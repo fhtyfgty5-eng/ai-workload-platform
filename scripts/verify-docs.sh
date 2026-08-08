@@ -27,7 +27,7 @@ required_files=(
   "docs/架构/架构基线.md"
   "docs/学习/学习资料规范.md"
   "docs/学习/CSDN发布模板.md"
-  "docs/学习/文章/模块0-术语与项目导览.md"
+  "docs/学习/文章/模块0-工作流-DAG-状态机与可靠执行基础.md"
   "docs/计划/项目路线图.md"
   "docs/计划/模块0详细计划.md"
   "docs/决策/ADR-0001-项目范围.md"
