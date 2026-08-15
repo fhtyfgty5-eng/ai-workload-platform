@@ -46,6 +46,14 @@ rm "$FIXTURE/README.md"
 expect_failure missing_required_file
 
 prepare_fixture
+rm "$FIXTURE/docs/计划/模块1需求与设计.md"
+expect_failure missing_current_module_design
+
+prepare_fixture
+rm "$FIXTURE/docs/学习/文章/模块1-单机可靠工作流内核设计与验证基础.md"
+expect_failure missing_current_module_learning_article
+
+prepare_fixture
 printf '\n[坏链接](docs/不存在.md)\n' >> "$FIXTURE/README.md"
 expect_failure broken_local_link
 
@@ -53,4 +61,12 @@ prepare_fixture
 printf '\n<<<<<<< conflict\n' >> "$FIXTURE/README.md"
 expect_failure conflict_marker
 
-printf '4/4 scenarios passed\n'
+prepare_fixture
+printf '\n本机目录：/Users/example/private-project\n' >> "$FIXTURE/README.md"
+expect_failure local_absolute_path
+
+prepare_fixture
+printf '未跟踪文档包含尾随空白  \n' > "$FIXTURE/docs/未跟踪文档.md"
+expect_failure untracked_markdown_trailing_whitespace
+
+printf '8/8 scenarios passed\n'

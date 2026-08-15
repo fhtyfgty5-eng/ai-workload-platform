@@ -28,9 +28,12 @@ required_files=(
   "docs/学习/学习资料规范.md"
   "docs/学习/CSDN发布模板.md"
   "docs/学习/文章/模块0-工作流-DAG-状态机与可靠执行基础.md"
+  "docs/学习/文章/模块1-单机可靠工作流内核设计与验证基础.md"
   "docs/计划/项目路线图.md"
   "docs/计划/模块0详细计划.md"
+  "docs/计划/模块1需求与设计.md"
   "docs/决策/ADR-0001-项目范围.md"
+  "docs/决策/ADR-0002-产品定位与模块路线调整.md"
 )
 
 for relative_path in "${required_files[@]}"; do
@@ -50,8 +53,16 @@ if command -v rg >/dev/null 2>&1; then
   else
     printf 'PASS conflict_markers\n'
   fi
+
+  local_path_output=$(rg -n --glob '*.md' '(/Users/[^/[:space:]]+/|/home/[^/[:space:]]+/|[A-Za-z]:\\Users\\[^\\[:space:]]+\\)' "$ROOT/README.md" "$ROOT/项目状态.md" "$ROOT/docs" 2>/dev/null || true)
+  if [[ -n "$local_path_output" ]]; then
+    printf '%s\n' "$local_path_output" >&2
+    fail 'local absolute paths in Markdown'
+  else
+    printf 'PASS local_absolute_paths\n'
+  fi
 else
-  fail 'rg is required for conflict marker checks'
+  fail 'rg is required for conflict marker and local path checks'
 fi
 
 if python3 - "$ROOT" <<'PY'
@@ -69,6 +80,8 @@ for markdown_file in root.rglob("*.md"):
     if ".git" in markdown_file.parts:
         continue
     for line_number, line in enumerate(markdown_file.read_text(encoding="utf-8").splitlines(), 1):
+        if line.endswith((" ", "\t")):
+            errors.append(f"{markdown_file}:{line_number}: trailing whitespace")
         for raw_target in pattern.findall(line):
             if raw_target.startswith(("#", "http://", "https://", "mailto:")):
                 continue
@@ -89,6 +102,7 @@ if errors:
     print("\n".join(errors), file=sys.stderr)
     sys.exit(1)
 print(f"PASS local_links ({checked})")
+print("PASS markdown_trailing_whitespace")
 PY
 then
   :
