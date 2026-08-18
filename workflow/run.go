@@ -2,6 +2,8 @@ package workflow
 
 import "time"
 
+const currentSnapshotVersion = 1
+
 // RunID 是工作流运行实例的唯一标识。
 type RunID string
 
@@ -80,7 +82,7 @@ type WorkflowRun struct {
 
 // RunSnapshot 是 Store 原子读写的完整持久化单元。
 type RunSnapshot struct {
-	// Version 是持久化结构版本，为后续兼容迁移保留。
+	// Version 是持久化结构版本；恢复只接受当前版本，未来版本需先实现显式迁移。
 	Version int `json:"version"`
 	// Definition 保存恢复调度所需的完整定义副本。
 	Definition *WorkflowDefinition `json:"definition"`
@@ -105,7 +107,7 @@ func newRunSnapshot(id RunID, compiled *CompiledWorkflow, now time.Time) RunSnap
 	}
 
 	return RunSnapshot{
-		Version:    1,
+		Version:    currentSnapshotVersion,
 		Definition: compiled.definition,
 		Run: WorkflowRun{
 			ID:                    id,

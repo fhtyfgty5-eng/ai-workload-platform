@@ -26,9 +26,9 @@ type Engine struct {
 	clock    Clock
 	newRunID func() (RunID, error)
 
-	// mu 同时保护 active 和 compiled；Execute 的单 Run 事件循环不依赖该锁提交状态。
+	// mu 同时保护 active 和 compiled；单 Run 事件循环不依赖该锁提交状态。
 	mu sync.Mutex
-	// active 保存当前进程内正在 Execute 的 Run 取消函数，防止同一 Run 被重复调度。
+	// active 保存当前进程内正在 Execute 或 Resume 的 Run 取消函数，防止同一 Run 被重复调度。
 	active map[RunID]context.CancelFunc
 	// compiled 缓存可跨 Run 共享的只读编译结果；终态 Run 会释放对应条目。
 	compiled map[RunID]*CompiledWorkflow
@@ -75,24 +75,34 @@ func (e *Engine) CreateRun(ctx context.Context, compiled *CompiledWorkflow) (Run
 	return id, nil
 }
 
-// Execute 调度指定 Run 的可执行任务，直到工作流成功、失败或发生系统错误。
-func (e *Engine) Execute(ctx context.Context, id RunID) (WorkflowRun, error) {
-	// 必须先登记 active 再读取快照，避免并发 Cancel 保存 canceled 后，本次 Execute 用旧快照覆盖终态。
+// registerActiveRun 建立单 Run 的取消 Context，并在返回的 release 中释放 active 所有权。
+// active 在 Store.Load 前登记，避免 Cancel 基于旧快照并发写入后被 Execute 或 Resume 覆盖。
+func (e *Engine) registerActiveRun(ctx context.Context, id RunID) (context.Context, context.CancelFunc, func(), error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	if _, exists := e.active[id]; exists {
 		e.mu.Unlock()
 		cancel()
-		return WorkflowRun{}, fmt.Errorf("run %q is already executing", id)
+		return nil, nil, nil, fmt.Errorf("run %q is already executing", id)
 	}
 	e.active[id] = cancel
 	e.mu.Unlock()
-	defer func() {
+	release := func() {
 		cancel()
 		e.mu.Lock()
 		delete(e.active, id)
 		e.mu.Unlock()
-	}()
+	}
+	return runCtx, cancel, release, nil
+}
+
+// Execute 调度指定 Run 的可执行任务，直到工作流成功、失败或发生系统错误。
+func (e *Engine) Execute(ctx context.Context, id RunID) (WorkflowRun, error) {
+	runCtx, cancel, release, err := e.registerActiveRun(ctx, id)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	defer release()
 
 	// 父 Context 可能在加载前已取消；仍需读取事实快照，才能把非终态 Run 持久化为 canceled。
 	snapshot, err := e.store.Load(context.WithoutCancel(ctx), id)
@@ -112,7 +122,17 @@ func (e *Engine) Execute(ctx context.Context, id RunID) (WorkflowRun, error) {
 	if runCtx.Err() != nil {
 		return e.finalizeCancellation(ctx, snapshot)
 	}
+	return e.executeSnapshot(ctx, runCtx, cancel, compiled, snapshot)
+}
 
+// executeSnapshot 是 Execute 与 Resume 共用的单 Run 调度核心；调用方负责 active 生命周期。
+func (e *Engine) executeSnapshot(
+	ctx context.Context,
+	runCtx context.Context,
+	cancel context.CancelFunc,
+	compiled *CompiledWorkflow,
+	snapshot RunSnapshot,
+) (WorkflowRun, error) {
 	if snapshot.Run.Status == WorkflowPending {
 		// 先在副本中推进并保存，再替换内存快照；保存失败时旧状态仍是事实来源。
 		updated := cloneRunSnapshot(snapshot)
@@ -135,6 +155,12 @@ func (e *Engine) Execute(ctx context.Context, id RunID) (WorkflowRun, error) {
 	completions := make(chan executionCompletion, len(snapshot.Run.Tasks))
 	timeouts := make(chan executionTimeout, len(snapshot.Run.Tasks))
 	retries := make(chan retryReady, len(snapshot.Run.Tasks))
+	// Resume 可能带入已经持久化的 waiting_retry；必须在事件循环开始前恢复对应计时器。
+	for taskIndex, task := range snapshot.Run.Tasks {
+		if task.Status == TaskWaitingRetry {
+			e.scheduleRetry(runCtx, taskIndex, task, retries)
+		}
+	}
 	// activeAttempts 只由事件循环访问；键存在表示该 Attempt 尚未接受过完成或超时事件。
 	activeAttempts := make(map[attemptKey]attemptControl)
 	defer func() {
@@ -331,7 +357,7 @@ func (e *Engine) Execute(ctx context.Context, id RunID) (WorkflowRun, error) {
 		finalStatus = WorkflowFailed
 		reason = "one or more tasks failed"
 	} else if !allTasksSucceeded(snapshot.Run.Tasks) {
-		return WorkflowRun{}, fmt.Errorf("workflow %q has no runnable tasks", id)
+		return WorkflowRun{}, fmt.Errorf("workflow %q has no runnable tasks", snapshot.Run.ID)
 	}
 	updated := cloneRunSnapshot(snapshot)
 	if err := transitionWorkflow(&updated, finalStatus, e.clock.Now(), reason); err != nil {
@@ -343,7 +369,7 @@ func (e *Engine) Execute(ctx context.Context, id RunID) (WorkflowRun, error) {
 		}
 		return WorkflowRun{}, err
 	}
-	e.forgetCompiled(id)
+	e.forgetCompiled(snapshot.Run.ID)
 	return updated.Run, nil
 }
 
@@ -356,13 +382,13 @@ func (e *Engine) GetRun(ctx context.Context, id RunID) (WorkflowRun, error) {
 	return snapshot.Run, nil
 }
 
-// Cancel 请求取消指定 Run。活动 Run 由 Execute 收敛状态，非活动 Run 在此直接保存取消快照。
+// Cancel 请求取消指定 Run。活动 Run 由 Execute 或 Resume 收敛状态，非活动 Run 在此直接保存取消快照。
 func (e *Engine) Cancel(ctx context.Context, id RunID) error {
 	e.mu.Lock()
 	cancel, active := e.active[id]
 	if active {
 		e.mu.Unlock()
-		// nil 只表示请求已送达；最终取消状态仍由 Execute 的事件循环持久化。
+		// nil 只表示请求已送达；最终取消状态仍由当前活动调度流程持久化。
 		cancel()
 		return nil
 	}
@@ -511,7 +537,7 @@ func finishActiveAttempt(active map[attemptKey]attemptControl, key attemptKey) b
 	return true
 }
 
-// scheduleRetry 只在 waiting_retry 快照保存成功后注册固定间隔计时器。
+// scheduleRetry 按已持久化的绝对 ReadyAt 注册剩余等待计时器。
 func (e *Engine) scheduleRetry(ctx context.Context, taskIndex int, task TaskRun, retries chan<- retryReady) {
 	if task.ReadyAt == nil || len(task.Attempts) == 0 {
 		return
@@ -709,7 +735,15 @@ func cancellationSnapshot(snapshot RunSnapshot, at time.Time) (RunSnapshot, erro
 
 // skipDescendants 沿 DAG 向下传播失败，只跳过尚未进入终态的后代。
 func skipDescendants(snapshot *RunSnapshot, compiled *CompiledWorkflow, failedTask int, at time.Time) error {
-	queue := append([]int(nil), compiled.successors[failedTask]...)
+	return skipDescendantsFrom(snapshot, compiled, []int{failedTask}, at)
+}
+
+// skipDescendantsFrom 从多个失败源一次遍历全部后代，恢复大量终态任务时仍保持 O(V + E)。
+func skipDescendantsFrom(snapshot *RunSnapshot, compiled *CompiledWorkflow, failedTasks []int, at time.Time) error {
+	queue := make([]int, 0)
+	for _, failedTask := range failedTasks {
+		queue = append(queue, compiled.successors[failedTask]...)
+	}
 	visited := make([]bool, len(snapshot.Run.Tasks))
 	for len(queue) > 0 {
 		current := queue[0]
