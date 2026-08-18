@@ -1,0 +1,31 @@
+{
+  "id": "document-pipeline",
+  "concurrency": 2,
+  "tasks": [
+    {
+      "key": "read",
+      "action": "mock-read",
+      "retry": {
+        "max_attempts": 2,
+        "interval_ms": 100
+      },
+      "timeout_ms": 3000
+    },
+    {
+      "key": "clean",
+      "action": "mock-clean",
+      "depends_on": [
+        "read"
+      ],
+      "timeout_ms": 3000
+    },
+    {
+      "key": "summarize",
+      "action": "mock-summarize",
+      "depends_on": [
+        "clean"
+      ],
+      "timeout_ms": 5000
+    }
+  ]
+}
