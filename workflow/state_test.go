@@ -59,6 +59,21 @@ func TestTaskTransitionRecordsTerminalTimeAndEvent(t *testing.T) {
 	}
 }
 
+func TestTaskTransitionClearsRetryTimeWhenCanceled(t *testing.T) {
+	readyAt := time.Unix(10, 0)
+	snapshot := RunSnapshot{Run: WorkflowRun{Tasks: []TaskRun{{
+		Key:     "clean",
+		Status:  TaskWaitingRetry,
+		ReadyAt: &readyAt,
+	}}}}
+	if err := transitionTask(&snapshot, 0, TaskCanceled, time.Unix(5, 0), "canceled"); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Run.Tasks[0].ReadyAt != nil {
+		t.Fatalf("ReadyAt = %v, want nil after cancellation", snapshot.Run.Tasks[0].ReadyAt)
+	}
+}
+
 func TestAttemptTransitionRejectsTerminalStateExit(t *testing.T) {
 	attempt := Attempt{Number: 1, Status: AttemptSucceeded}
 	snapshot := RunSnapshot{Run: WorkflowRun{Tasks: []TaskRun{{Key: "clean", Attempts: []Attempt{attempt}}}}}

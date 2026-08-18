@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -441,5 +442,411 @@ func TestExecuteTaskDropsTimeoutAfterRunStops(t *testing.T) {
 	case timeout := <-timeouts:
 		t.Fatalf("received timeout after run stopped: %+v", timeout)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestEngineCancelStopsRunningAndCancelsPendingTasks(t *testing.T) {
+	store := newMemoryStore()
+	executor := newAlwaysBlockingExecutor()
+	engine := newTestEngine(store, executor)
+	id := createTwoTaskRun(t, engine, RetryPolicy{MaxAttempts: 3})
+	done := executeAsync(engine, id)
+	waitForSignal(t, executor.started, "running attempt")
+
+	if err := engine.Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	run := receiveRun(t, done)
+	if run.Status != WorkflowCanceled {
+		t.Fatalf("workflow status = %s, want canceled", run.Status)
+	}
+	if run.Tasks[0].Status != TaskCanceled || run.Tasks[1].Status != TaskCanceled {
+		t.Fatalf("task statuses = %s, %s; want canceled, canceled", run.Tasks[0].Status, run.Tasks[1].Status)
+	}
+	if len(run.Tasks[0].Attempts) != 1 || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
+		t.Fatalf("attempts = %+v, want one canceled attempt", run.Tasks[0].Attempts)
+	}
+}
+
+func TestEngineCancelWhileWaitingRetryReturnsWithoutWaitingForTimer(t *testing.T) {
+	clock := newManualClock(time.Unix(100, 0))
+	store := newMemoryStore()
+	executor := newSequenceExecutor([]ExecutionResponse{{Kind: ResultTemporaryFailure}})
+	engine := newTestEngineWithClock(store, executor, clock)
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 2, IntervalMillis: 60_000}, 60_000)
+	done := executeAsync(engine, id)
+	executor.waitForCalls(t, 1)
+	// Attempt 超时计时器和重试计时器都已注册，说明快照已经进入 waiting_retry。
+	clock.waitForTimers(t, 2)
+
+	if err := engine.Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	run := receiveRun(t, done)
+	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskCanceled {
+		t.Fatalf("workflow = %s, task = %s; want canceled, canceled", run.Status, run.Tasks[0].Status)
+	}
+}
+
+func TestEngineCancelPendingRunWithoutActiveExecute(t *testing.T) {
+	store := newMemoryStore()
+	engine := newTestEngine(store, newRecordingExecutor(nil))
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 1000)
+
+	if err := engine.Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	run, err := engine.GetRun(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskCanceled {
+		t.Fatalf("workflow = %s, task = %s; want canceled, canceled", run.Status, run.Tasks[0].Status)
+	}
+}
+
+func TestEngineRegistersActiveBeforeLoadingSnapshot(t *testing.T) {
+	store := newStaleFirstLoadStore()
+	executor := newRecordingExecutor(nil)
+	engine := newTestEngine(store, executor)
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 1000)
+	done := executeAsync(engine, id)
+	waitForSignal(t, store.firstLoadStarted, "Execute first load")
+
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- engine.Cancel(context.Background(), id) }()
+	select {
+	case err := <-cancelDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Cancel blocked while Execute was loading")
+	}
+	close(store.releaseFirstLoad)
+	run := receiveRun(t, done)
+	if run.Status != WorkflowCanceled {
+		t.Fatalf("status = %s, want canceled", run.Status)
+	}
+	if executor.callCount() != 0 {
+		t.Fatalf("executor calls = %d, want 0 after cancellation", executor.callCount())
+	}
+}
+
+func TestEngineParentContextCancellationCancelsRunningAttempt(t *testing.T) {
+	store := newMemoryStore()
+	executor := newAlwaysBlockingExecutor()
+	engine := newTestEngine(store, executor)
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 2}, 60_000)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := executeAsyncWithContext(engine, ctx, id)
+	waitForSignal(t, executor.started, "running attempt")
+
+	cancel()
+	run := receiveRun(t, done)
+	if run.Status != WorkflowCanceled || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
+		t.Fatalf("workflow = %s, attempt = %s; want canceled, canceled", run.Status, run.Tasks[0].Attempts[0].Status)
+	}
+}
+
+func TestEngineParentDeadlineCancelsRunningAttempt(t *testing.T) {
+	store := newMemoryStore()
+	executor := newAlwaysBlockingExecutor()
+	engine := newTestEngine(store, executor)
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 2}, 60_000)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := executeAsyncWithContext(engine, ctx, id)
+	waitForSignal(t, executor.started, "running attempt")
+
+	run := receiveRun(t, done)
+	if run.Status != WorkflowCanceled || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
+		t.Fatalf("workflow = %s, attempt = %s; want canceled, canceled", run.Status, run.Tasks[0].Attempts[0].Status)
+	}
+}
+
+func TestEngineCancelInactiveRunningSnapshotCancelsCurrentAttempt(t *testing.T) {
+	store := newMemoryStore()
+	engine := newTestEngine(store, newRecordingExecutor(nil))
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 2}, 1000)
+	snapshot, err := store.Load(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(100, 0)
+	if err := transitionWorkflow(&snapshot, WorkflowRunning, at, "test setup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := transitionTask(&snapshot, 0, TaskRunning, at, "test setup"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Run.Tasks[0].Attempts = append(snapshot.Run.Tasks[0].Attempts, Attempt{Number: 1, Status: AttemptRunning, StartedAt: at})
+	if err := store.Save(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := engine.Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	run, err := engine.GetRun(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskCanceled || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
+		t.Fatalf("run = %+v, want workflow, task and attempt canceled", run)
+	}
+}
+
+func TestEngineCancelInactiveWaitingRetryPreservesFailedAttempt(t *testing.T) {
+	store := newMemoryStore()
+	engine := newTestEngine(store, newRecordingExecutor(nil))
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 2}, 1000)
+	snapshot, err := store.Load(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(100, 0)
+	if err := transitionWorkflow(&snapshot, WorkflowRunning, at, "test setup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := transitionTask(&snapshot, 0, TaskRunning, at, "test setup"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Run.Tasks[0].Attempts = append(snapshot.Run.Tasks[0].Attempts, Attempt{Number: 1, Status: AttemptRunning, StartedAt: at})
+	if err := transitionAttempt(&snapshot, snapshot.Run.Tasks[0].Key, &snapshot.Run.Tasks[0].Attempts[0], AttemptFailed, at, "test setup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := transitionTask(&snapshot, 0, TaskWaitingRetry, at, "test setup"); err != nil {
+		t.Fatal(err)
+	}
+	readyAt := at.Add(time.Minute)
+	snapshot.Run.Tasks[0].ReadyAt = &readyAt
+	if err := store.Save(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := engine.Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	run, err := engine.GetRun(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskCanceled {
+		t.Fatalf("workflow = %s, task = %s; want canceled, canceled", run.Status, run.Tasks[0].Status)
+	}
+	if run.Tasks[0].Attempts[0].Status != AttemptFailed || run.Tasks[0].ReadyAt != nil {
+		t.Fatalf("task = %+v, want failed attempt preserved and ReadyAt cleared", run.Tasks[0])
+	}
+}
+
+func TestEngineCancelIsIdempotentForCanceledAndSucceededRuns(t *testing.T) {
+	t.Run("already canceled", func(t *testing.T) {
+		engine := newTestEngine(newMemoryStore(), newRecordingExecutor(nil))
+		id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 1000)
+		if err := engine.Cancel(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.Cancel(context.Background(), id); err != nil {
+			t.Fatalf("second Cancel() error = %v, want nil", err)
+		}
+	})
+
+	t.Run("already succeeded", func(t *testing.T) {
+		engine := newTestEngine(newMemoryStore(), newRecordingExecutor(nil))
+		id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 1000)
+		if _, err := engine.Execute(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.Cancel(context.Background(), id); err != nil {
+			t.Fatalf("Cancel() error = %v, want nil", err)
+		}
+	})
+}
+
+func TestEngineCancelUnknownRunReturnsNotFound(t *testing.T) {
+	engine := newTestEngine(newMemoryStore(), newRecordingExecutor(nil))
+	if err := engine.Cancel(context.Background(), "missing"); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("Cancel() error = %v, want ErrRunNotFound", err)
+	}
+}
+
+func TestEngineCancelSaveFailurePreservesPreviousSnapshot(t *testing.T) {
+	// Create 成功，非活动 Cancel 的 Save 失败。
+	store := newFailingStore(2)
+	engine := newTestEngine(store, newRecordingExecutor(nil))
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 1000)
+	if err := engine.Cancel(context.Background(), id); err == nil {
+		t.Fatal("Cancel() error = nil, want save failure")
+	}
+	run, err := engine.GetRun(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != WorkflowPending || run.Tasks[0].Status != TaskReady {
+		t.Fatalf("workflow = %s, task = %s; want previous pending, ready snapshot", run.Status, run.Tasks[0].Status)
+	}
+}
+
+func TestEngineActiveCancelSaveFailureIsReturnedByExecute(t *testing.T) {
+	// Create、WorkflowRunning 和 AttemptRunning 成功，取消终态 Save 失败。
+	store := newFailingStore(4)
+	executor := newAlwaysBlockingExecutor()
+	engine := newTestEngine(store, executor)
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 60_000)
+	done := executeAsync(engine, id)
+	waitForSignal(t, executor.started, "running attempt")
+
+	if err := engine.Cancel(context.Background(), id); err != nil {
+		t.Fatalf("Cancel() error = %v, want request accepted", err)
+	}
+	select {
+	case result := <-done:
+		if result.err == nil {
+			t.Fatalf("Execute() = %+v, nil; want save failure", result.run)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Execute did not return cancellation save failure")
+	}
+	run, err := engine.GetRun(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != WorkflowRunning || run.Tasks[0].Status != TaskRunning || run.Tasks[0].Attempts[0].Status != AttemptRunning {
+		t.Fatalf("run = %+v, want previous running snapshot", run)
+	}
+}
+
+func TestEngineDoesNotUnlockSuccessorWhenSuccessCannotBeSaved(t *testing.T) {
+	// Create、WorkflowRunning、首个 AttemptRunning 成功，成功结果 Save 失败。
+	store := newFailingStore(4)
+	executor := newRecordingExecutor(map[string]ExecutionResponse{"first": {Kind: ResultSuccess}})
+	engine := newTestEngine(store, executor)
+	compiled := mustCompile(t, WorkflowDefinition{ID: "save-order", Concurrency: 1, Tasks: []TaskDefinition{
+		{Key: "first", Action: "first", TimeoutMillis: 1000},
+		{Key: "second", Action: "second", DependsOn: []TaskKey{"first"}, TimeoutMillis: 1000},
+	}})
+	id, err := engine.CreateRun(context.Background(), compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Execute(context.Background(), id); err == nil {
+		t.Fatal("Execute() error = nil, want save failure")
+	}
+	if executor.wasCalled("second") {
+		t.Fatal("successor started before predecessor success was saved")
+	}
+}
+
+func TestEngineSystemErrorCancelsOtherActiveAttempts(t *testing.T) {
+	store := newMemoryStore()
+	executor := newSystemErrorExecutor()
+	engine := newTestEngine(store, executor)
+	compiled := mustCompile(t, WorkflowDefinition{ID: "system-error", Concurrency: 2, Tasks: []TaskDefinition{
+		{Key: "invalid", Action: "invalid", TimeoutMillis: 60_000},
+		{Key: "blocked", Action: "blocked", TimeoutMillis: 60_000},
+	}})
+	id, err := engine.CreateRun(context.Background(), compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := executeAsync(engine, id)
+	waitForTaskStarts(t, executor.started, "invalid", "blocked")
+	close(executor.releaseInvalid)
+
+	select {
+	case result := <-done:
+		if result.err == nil || !strings.Contains(result.err.Error(), "unsupported execution result") {
+			t.Fatalf("Execute() error = %v, want unsupported execution result", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Execute did not return system error")
+	}
+	waitForSignal(t, executor.blockedCanceled, "other active attempt cancellation")
+}
+
+func TestEngineCanceledResultCancelsWorkflowWithoutRetry(t *testing.T) {
+	store := newMemoryStore()
+	executor := newSequenceExecutor([]ExecutionResponse{{Kind: ResultCanceled, ErrorCode: "canceled"}})
+	engine := newTestEngine(store, executor)
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 3}, 1000)
+
+	run, err := engine.Execute(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskCanceled {
+		t.Fatalf("workflow = %s, task = %s; want canceled, canceled", run.Status, run.Tasks[0].Status)
+	}
+	if len(run.Tasks[0].Attempts) != 1 || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
+		t.Fatalf("attempts = %+v, want one canceled attempt", run.Tasks[0].Attempts)
+	}
+}
+
+func TestEngineCancelDuringAttemptSaveDoesNotStartExecutor(t *testing.T) {
+	// Create 和 WorkflowRunning 保存完成，在 AttemptRunning 保存期间发出取消请求。
+	store := newBlockingSaveStore(3)
+	executor := newRecordingExecutor(nil)
+	engine := newTestEngine(store, executor)
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 1000)
+	done := executeAsync(engine, id)
+	waitForSignal(t, store.saveBlocked, "AttemptRunning save")
+
+	if err := engine.Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	close(store.releaseSave)
+	run := receiveRun(t, done)
+	if run.Status != WorkflowCanceled {
+		t.Fatalf("status = %s, want canceled", run.Status)
+	}
+	if executor.callCount() != 0 {
+		t.Fatalf("executor calls = %d, want 0 after cancellation", executor.callCount())
+	}
+}
+
+func TestEngineCancelDuringSuccessSaveDoesNotCreateSuccessorAttempt(t *testing.T) {
+	// Create、WorkflowRunning、首个 AttemptRunning 成功，在成功结果保存期间发出取消请求。
+	store := newBlockingSaveStore(4)
+	executor := newRecordingExecutor(map[string]ExecutionResponse{"first": {Kind: ResultSuccess}})
+	engine := newTestEngine(store, executor)
+	compiled := mustCompile(t, WorkflowDefinition{ID: "cancel-unlock", Concurrency: 1, Tasks: []TaskDefinition{
+		{Key: "first", Action: "first", TimeoutMillis: 1000},
+		{Key: "second", Action: "second", DependsOn: []TaskKey{"first"}, TimeoutMillis: 1000},
+	}})
+	id, err := engine.CreateRun(context.Background(), compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := executeAsync(engine, id)
+	waitForSignal(t, store.saveBlocked, "success result save")
+
+	if err := engine.Cancel(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	close(store.releaseSave)
+	run := receiveRun(t, done)
+	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskSucceeded || run.Tasks[1].Status != TaskCanceled {
+		t.Fatalf("task statuses = %s, %s; want succeeded, canceled", run.Tasks[0].Status, run.Tasks[1].Status)
+	}
+	if len(run.Tasks[1].Attempts) != 0 {
+		t.Fatalf("successor attempts = %+v, want none after cancellation", run.Tasks[1].Attempts)
+	}
+}
+
+func TestEngineParentCancellationDuringResultSavePersistsCanceledState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Create、WorkflowRunning、AttemptRunning 成功，在成功结果 Save 前取消父 Context。
+	store := newCancelOnSaveStore(4, cancel)
+	engine := newTestEngine(store, newRecordingExecutor(nil))
+	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 1000)
+
+	run, err := engine.Execute(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskCanceled || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
+		t.Fatalf("run = %+v, want parent cancellation persisted", run)
 	}
 }

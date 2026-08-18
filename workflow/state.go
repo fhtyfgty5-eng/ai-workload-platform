@@ -91,8 +91,8 @@ func transitionTask(snapshot *RunSnapshot, taskIndex int, to TaskStatus, at time
 		return fmt.Errorf("illegal task transition %s -> %s", from, to)
 	}
 	task.Status = to
-	// retry 到期转回 ready 时清除 ReadyAt，避免旧时间影响下一次重试判断。
-	if to == TaskReady {
+	// ReadyAt 只属于 waiting_retry；离开该状态后立即清除，避免终态仍携带重试含义。
+	if to != TaskWaitingRetry {
 		task.ReadyAt = nil
 	}
 	if to == TaskSucceeded || to == TaskFailed || to == TaskCanceled || to == TaskSkipped {
