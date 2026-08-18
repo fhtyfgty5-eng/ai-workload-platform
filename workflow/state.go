@@ -42,6 +42,7 @@ const (
 	AttemptInterrupted AttemptStatus = "interrupted"
 )
 
+// 三张转换表是状态机的唯一合法边集合；业务代码不能绕过 transition* 直接推进状态。
 var workflowTransitions = map[WorkflowStatus]map[WorkflowStatus]bool{
 	WorkflowPending: {WorkflowRunning: true, WorkflowCanceled: true},
 	WorkflowRunning: {WorkflowSucceeded: true, WorkflowFailed: true, WorkflowCanceled: true},
@@ -71,6 +72,7 @@ func transitionWorkflow(snapshot *RunSnapshot, to WorkflowStatus, at time.Time, 
 		return fmt.Errorf("illegal workflow transition %s -> %s", from, to)
 	}
 	snapshot.Run.Status = to
+	// started_at 只记录首次启动，finished_at 只在工作流终态设置。
 	if to == WorkflowRunning && snapshot.Run.StartedAt == nil {
 		snapshot.Run.StartedAt = &at
 	}
@@ -89,6 +91,7 @@ func transitionTask(snapshot *RunSnapshot, taskIndex int, to TaskStatus, at time
 		return fmt.Errorf("illegal task transition %s -> %s", from, to)
 	}
 	task.Status = to
+	// retry 到期转回 ready 时清除 ReadyAt，避免旧时间影响下一次重试判断。
 	if to == TaskReady {
 		task.ReadyAt = nil
 	}
@@ -111,6 +114,7 @@ func transitionAttempt(snapshot *RunSnapshot, taskKey TaskKey, attempt *Attempt,
 	return nil
 }
 
+// appendEvent 把状态、时间和审计记录保存在同一快照中，调用方随后将它们作为整体写入 Store。
 func appendEvent(snapshot *RunSnapshot, at time.Time, entity, key, from, to, reason string) {
 	snapshot.Events = append(snapshot.Events, StateEvent{
 		Sequence: uint64(len(snapshot.Events) + 1),

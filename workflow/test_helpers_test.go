@@ -197,6 +197,23 @@ func (e *recordingExecutor) definitionIDFor(action string) string {
 	return ""
 }
 
+func (e *recordingExecutor) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.calls)
+}
+
+func (e *recordingExecutor) wasCalled(action string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, call := range e.calls {
+		if call.action == action {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *recordingExecutor) startedBefore(action, dependency string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -278,8 +295,12 @@ func mustCompile(t *testing.T, definition WorkflowDefinition) *CompiledWorkflow 
 }
 
 func newTestEngine(store Store, executor Executor) *Engine {
+	return newTestEngineWithClock(store, executor, RealClock{})
+}
+
+func newTestEngineWithClock(store Store, executor Executor, clock Clock) *Engine {
 	engine, err := NewEngine(store, executor, EngineOptions{
-		Clock: RealClock{},
+		Clock: clock,
 		NewRunID: func() (RunID, error) {
 			return "run-one", nil
 		},
@@ -288,6 +309,203 @@ func newTestEngine(store Store, executor Executor) *Engine {
 		panic(err)
 	}
 	return engine
+}
+
+type sequenceExecutor struct {
+	mu        sync.Mutex
+	responses []ExecutionResponse
+	calls     chan struct{}
+}
+
+type blockingThenSuccessExecutor struct {
+	mu      sync.Mutex
+	calls   int
+	started chan struct{}
+}
+
+type alwaysBlockingExecutor struct {
+	started chan struct{}
+}
+
+type delayedReturnExecutor struct {
+	started  chan struct{}
+	release  chan struct{}
+	returned chan struct{}
+}
+
+func newDelayedReturnExecutor() *delayedReturnExecutor {
+	return &delayedReturnExecutor{
+		started:  make(chan struct{}, 1),
+		release:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+}
+
+func (e *delayedReturnExecutor) Execute(context.Context, ExecutionRequest) ExecutionResponse {
+	e.started <- struct{}{}
+	<-e.release
+	close(e.returned)
+	return ExecutionResponse{Kind: ResultSuccess}
+}
+
+func newAlwaysBlockingExecutor() *alwaysBlockingExecutor {
+	return &alwaysBlockingExecutor{started: make(chan struct{}, 1)}
+}
+
+func (e *alwaysBlockingExecutor) Execute(ctx context.Context, _ ExecutionRequest) ExecutionResponse {
+	e.started <- struct{}{}
+	<-ctx.Done()
+	return ExecutionResponse{Kind: ResultCanceled}
+}
+
+type retryWhileBlockedExecutor struct {
+	mu             sync.Mutex
+	retryCalls     int
+	retryStarted   chan struct{}
+	blockedStarted chan struct{}
+	releaseBlocked chan struct{}
+}
+
+func newRetryWhileBlockedExecutor() *retryWhileBlockedExecutor {
+	return &retryWhileBlockedExecutor{
+		retryStarted:   make(chan struct{}, 2),
+		blockedStarted: make(chan struct{}, 1),
+		releaseBlocked: make(chan struct{}),
+	}
+}
+
+func (e *retryWhileBlockedExecutor) Execute(ctx context.Context, request ExecutionRequest) ExecutionResponse {
+	if request.Action == "retry" {
+		e.mu.Lock()
+		e.retryCalls++
+		call := e.retryCalls
+		e.mu.Unlock()
+		e.retryStarted <- struct{}{}
+		if call == 1 {
+			return ExecutionResponse{Kind: ResultTemporaryFailure}
+		}
+		return ExecutionResponse{Kind: ResultSuccess}
+	}
+	e.blockedStarted <- struct{}{}
+	select {
+	case <-ctx.Done():
+		return ExecutionResponse{Kind: ResultCanceled}
+	case <-e.releaseBlocked:
+		return ExecutionResponse{Kind: ResultSuccess}
+	}
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("%s not observed", name)
+	}
+}
+
+func newBlockingThenSuccessExecutor() *blockingThenSuccessExecutor {
+	return &blockingThenSuccessExecutor{started: make(chan struct{}, 2)}
+}
+
+func (e *blockingThenSuccessExecutor) Execute(ctx context.Context, _ ExecutionRequest) ExecutionResponse {
+	e.mu.Lock()
+	e.calls++
+	call := e.calls
+	e.mu.Unlock()
+	e.started <- struct{}{}
+	if call == 1 {
+		<-ctx.Done()
+		return ExecutionResponse{Kind: ResultCanceled}
+	}
+	return ExecutionResponse{Kind: ResultSuccess}
+}
+
+func (e *blockingThenSuccessExecutor) waitForCalls(t *testing.T, count int) {
+	t.Helper()
+	for range count {
+		select {
+		case <-e.started:
+		case <-time.After(time.Second):
+			t.Fatal("executor call not observed")
+		}
+	}
+}
+
+func newSequenceExecutor(responses []ExecutionResponse) *sequenceExecutor {
+	return &sequenceExecutor{responses: responses, calls: make(chan struct{}, 1024)}
+}
+
+func (e *sequenceExecutor) Execute(_ context.Context, _ ExecutionRequest) ExecutionResponse {
+	e.mu.Lock()
+	response := e.responses[0]
+	e.responses = e.responses[1:]
+	e.mu.Unlock()
+	e.calls <- struct{}{}
+	return response
+}
+
+func (e *sequenceExecutor) waitForCalls(t *testing.T, count int) {
+	t.Helper()
+	for range count {
+		select {
+		case <-e.calls:
+		case <-time.After(time.Second):
+			t.Fatal("executor call not observed")
+		}
+	}
+}
+
+func createSingleTaskRun(t *testing.T, engine *Engine, retry RetryPolicy, timeout int64) RunID {
+	t.Helper()
+	return createRun(t, engine, WorkflowDefinition{ID: "single", Concurrency: 1, Tasks: []TaskDefinition{{
+		Key: "a", Action: "a", Retry: retry, TimeoutMillis: timeout,
+	}}})
+}
+
+func createTwoTaskRun(t *testing.T, engine *Engine, retry RetryPolicy) RunID {
+	t.Helper()
+	return createRun(t, engine, WorkflowDefinition{ID: "two", Concurrency: 1, Tasks: []TaskDefinition{
+		{Key: "a", Action: "a", Retry: retry, TimeoutMillis: 1000},
+		{Key: "b", Action: "b", DependsOn: []TaskKey{"a"}, TimeoutMillis: 1000},
+	}})
+}
+
+func createRun(t *testing.T, engine *Engine, definition WorkflowDefinition) RunID {
+	t.Helper()
+	id, err := engine.CreateRun(context.Background(), mustCompile(t, definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+type runResult struct {
+	run WorkflowRun
+	err error
+}
+
+func executeAsync(engine *Engine, id RunID) <-chan runResult {
+	done := make(chan runResult, 1)
+	go func() {
+		run, err := engine.Execute(context.Background(), id)
+		done <- runResult{run: run, err: err}
+	}()
+	return done
+}
+
+func receiveRun(t *testing.T, done <-chan runResult) WorkflowRun {
+	t.Helper()
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		return result.run
+	case <-time.After(time.Second):
+		t.Fatal("engine did not finish")
+		return WorkflowRun{}
+	}
 }
 
 func independentWorkflow(tasks, concurrency int) WorkflowDefinition {
