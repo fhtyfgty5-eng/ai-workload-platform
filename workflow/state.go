@@ -116,15 +116,19 @@ func transitionAttempt(snapshot *RunSnapshot, taskKey TaskKey, attempt *Attempt,
 
 // appendEvent 把状态、时间和审计记录保存在同一快照中，调用方随后将它们作为整体写入 Store。
 func appendEvent(snapshot *RunSnapshot, at time.Time, entity, key, from, to, reason string) {
-	snapshot.Events = append(snapshot.Events, StateEvent{
-		Sequence: uint64(len(snapshot.Events) + 1),
+	// 旧版 FileStore 快照没有 LastEventSequence 字段；统一从已保存的最后事件完成向后兼容推导。
+	lastSequence := snapshotLastEventSequence(*snapshot)
+	event := StateEvent{
+		Sequence: lastSequence + 1,
 		At:       at,
 		Entity:   entity,
 		Key:      key,
 		From:     from,
 		To:       to,
 		Reason:   reason,
-	})
+	}
+	snapshot.Events = append(snapshot.Events, event)
+	snapshot.Run.LastEventSequence = event.Sequence
 }
 
 func isWorkflowTerminal(status WorkflowStatus) bool {

@@ -1,0 +1,15 @@
+{
+  "id": "module2-recovery-demo",
+  "concurrency": 1,
+  "tasks": [
+    {
+      "key": "long-running",
+      "action": "mock-long-running",
+      "timeout_ms": 120000,
+      "retry": {
+        "max_attempts": 2,
+        "interval_ms": 100
+      }
+    }
+  ]
+}

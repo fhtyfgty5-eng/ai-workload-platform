@@ -22,6 +22,14 @@ type CompiledWorkflow struct {
 	successors [][]int
 }
 
+// Definition returns an isolated copy of the validated workflow definition.
+func (c *CompiledWorkflow) Definition() WorkflowDefinition {
+	if c == nil || c.definition == nil {
+		return WorkflowDefinition{}
+	}
+	return cloneDefinition(*c.definition)
+}
+
 // Compile 校验工作流定义，并在线性遍历中建立调度所需的索引和邻接表。
 func Compile(def WorkflowDefinition) (*CompiledWorkflow, error) {
 	// 深拷贝隔离调用方后续修改，确保编译结果能在多个运行实例之间安全共享。

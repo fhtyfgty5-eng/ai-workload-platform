@@ -1,6 +1,9 @@
 package workflow
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 const currentSnapshotVersion = 1
 
@@ -68,8 +71,16 @@ type WorkflowRun struct {
 	ID RunID `json:"id"`
 	// DefinitionID 标识本次运行采用的 WorkflowDefinition。
 	DefinitionID string `json:"definition_id"`
+	// DefinitionVersion 标识控制面中不可变的工作流版本；本地模式和旧快照使用零值。
+	DefinitionVersion int `json:"definition_version,omitempty"`
 	// Status 是整个 Run 的生命周期状态。
 	Status WorkflowStatus `json:"status"`
+	// Revision 是该 Run 的持久化版本；每次成功状态提交递增，用于拒绝旧快照覆盖新状态。
+	Revision uint64 `json:"revision"`
+	// LastEventSequence 是该 Run 已持久化的最后事件序号，和 Events 中的 Sequence 保持一致。
+	LastEventSequence uint64 `json:"last_event_sequence"`
+	// CancelRequestedAt 记录取消请求的持久化时间；它不依赖进程内 Context，服务重启后仍可恢复。
+	CancelRequestedAt *time.Time `json:"cancel_requested_at,omitempty"`
 	// Tasks 与编译后定义保持相同下标，调度器据此进行 O(1) 定位。
 	Tasks []TaskRun `json:"tasks"`
 	// RemainingDependencies[i] 是第 i 个任务尚未成功的直接依赖数量，每个 Run 独立维护。
@@ -90,6 +101,23 @@ type RunSnapshot struct {
 	Run WorkflowRun `json:"run"`
 	// Events 按 Sequence 保存状态转换审计记录。
 	Events []StateEvent `json:"events"`
+}
+
+// NewRunSnapshotForVersion builds an initial Run snapshot bound to one immutable workflow version.
+// 控制面先构造该快照，再由 Repository 将 Run、TaskRun 和幂等记录放在同一事务中创建。
+func NewRunSnapshotForVersion(id RunID, compiled *CompiledWorkflow, version int, now time.Time) (RunSnapshot, error) {
+	if id == "" {
+		return RunSnapshot{}, fmt.Errorf("run ID is required")
+	}
+	if compiled == nil {
+		return RunSnapshot{}, fmt.Errorf("compiled workflow is required")
+	}
+	if version <= 0 {
+		return RunSnapshot{}, fmt.Errorf("definition version must be positive")
+	}
+	snapshot := newRunSnapshot(id, compiled, now)
+	snapshot.Run.DefinitionVersion = version
+	return snapshot, nil
 }
 
 // newRunSnapshot 从只读编译结果创建每个 Run 独享的状态、Attempt 历史和依赖计数。

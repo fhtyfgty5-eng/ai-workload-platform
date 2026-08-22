@@ -8,13 +8,13 @@ import (
 
 // Resume 从持久化快照重建运行时计数，并按至少执行一次语义继续运行。
 func (e *Engine) Resume(ctx context.Context, id RunID) (WorkflowRun, error) {
-	runCtx, cancel, release, err := e.registerActiveRun(ctx, id)
+	runCtx, stop, release, err := e.registerActiveRun(ctx, id)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
 	defer release()
 
-	// 即使父 Context 已取消也要读取事实快照，才能为非终态 Run 保存 canceled。
+	// 即使父 Context 已取消也读取事实快照，以便判断终态或已持久化的业务取消请求。
 	snapshot, err := e.store.Load(context.WithoutCancel(ctx), id)
 	if err != nil {
 		return WorkflowRun{}, err
@@ -23,8 +23,8 @@ func (e *Engine) Resume(ctx context.Context, id RunID) (WorkflowRun, error) {
 	if snapshot.Version != currentSnapshotVersion {
 		return WorkflowRun{}, fmt.Errorf("unsupported snapshot version %d", snapshot.Version)
 	}
-	if snapshot.Run.ID != id {
-		return WorkflowRun{}, fmt.Errorf("stored run id %q does not match requested run %q", snapshot.Run.ID, id)
+	if err := validateStoredRunID(snapshot, id); err != nil {
+		return WorkflowRun{}, err
 	}
 	if isWorkflowTerminal(snapshot.Run.Status) {
 		return snapshot.Run, nil
@@ -32,8 +32,11 @@ func (e *Engine) Resume(ctx context.Context, id RunID) (WorkflowRun, error) {
 	if snapshot.Run.Status != WorkflowPending && snapshot.Run.Status != WorkflowRunning {
 		return WorkflowRun{}, fmt.Errorf("run %q has unsupported workflow status %q", id, snapshot.Run.Status)
 	}
-	if runCtx.Err() != nil {
+	if snapshot.Run.CancelRequestedAt != nil {
 		return e.finalizeCancellation(ctx, snapshot)
+	}
+	if runCtx.Err() != nil {
+		return e.stoppedRunResult(ctx, runCtx, snapshot)
 	}
 	if snapshot.Definition == nil {
 		return WorkflowRun{}, fmt.Errorf("run %q has no stored definition", id)
@@ -56,21 +59,25 @@ func (e *Engine) Resume(ctx context.Context, id RunID) (WorkflowRun, error) {
 	if err := prepareForResume(&updated, compiled, e.clock.Now()); err != nil {
 		return WorkflowRun{}, err
 	}
-	if err := e.store.Save(ctx, updated); err != nil {
+	if err := e.saveSnapshot(ctx, snapshot, &updated); err != nil {
 		if runCtx.Err() != nil {
-			return e.finalizeCancellation(ctx, snapshot)
+			return e.stoppedRunResult(ctx, runCtx, snapshot)
 		}
-		return WorkflowRun{}, err
+		return e.reconcilePersistedCancellation(ctx, id, err)
 	}
 	if runCtx.Err() != nil {
-		return e.finalizeCancellation(ctx, updated)
+		return e.stoppedRunResult(ctx, runCtx, updated)
 	}
 
 	// 恢复快照保存成功后才允许提交编译缓存并启动 Executor。
 	e.mu.Lock()
 	e.compiled[id] = compiled
 	e.mu.Unlock()
-	return e.executeSnapshot(ctx, runCtx, cancel, compiled, updated)
+	run, err := e.executeSnapshot(ctx, runCtx, stop, compiled, updated)
+	if err == nil {
+		return run, nil
+	}
+	return e.reconcilePersistedCancellation(ctx, id, err)
 }
 
 // prepareForResume 校验持久化任务状态，并从定义和任务事实重新构造调度状态。

@@ -28,6 +28,50 @@ func TestNewRunSnapshotHasIndependentDependencyCounts(t *testing.T) {
 	}
 }
 
+func TestNewRunSnapshotForVersionSetsImmutableDefinitionReference(t *testing.T) {
+	compiled, err := Compile(WorkflowDefinition{ID: "document-pipeline", Concurrency: 1, Tasks: []TaskDefinition{
+		{Key: "clean", Action: "clean", TimeoutMillis: 1},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := NewRunSnapshotForVersion("run-one", compiled, 3, time.Unix(1, 0))
+	if err != nil {
+		t.Fatalf("NewRunSnapshotForVersion() error = %v", err)
+	}
+	if snapshot.Run.DefinitionID != "document-pipeline" || snapshot.Run.DefinitionVersion != 3 {
+		t.Fatalf("definition reference = %s@%d, want document-pipeline@3", snapshot.Run.DefinitionID, snapshot.Run.DefinitionVersion)
+	}
+}
+
+func TestNewRunSnapshotForVersionRejectsInvalidInput(t *testing.T) {
+	compiled, err := Compile(WorkflowDefinition{ID: "document-pipeline", Concurrency: 1, Tasks: []TaskDefinition{
+		{Key: "clean", Action: "clean", TimeoutMillis: 1},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		id       RunID
+		compiled *CompiledWorkflow
+		version  int
+	}{
+		{name: "empty run id", compiled: compiled, version: 1},
+		{name: "nil compiled workflow", id: "run-one", version: 1},
+		{name: "zero version", id: "run-one", compiled: compiled},
+		{name: "negative version", id: "run-one", compiled: compiled, version: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewRunSnapshotForVersion(tt.id, tt.compiled, tt.version, time.Unix(1, 0)); err == nil {
+				t.Fatalf("NewRunSnapshotForVersion(%q, version=%d) error = nil, want non-nil", tt.id, tt.version)
+			}
+		})
+	}
+}
+
 func TestWorkflowTransitionAppendsSequencedEvent(t *testing.T) {
 	snapshot := RunSnapshot{Run: WorkflowRun{ID: "run-one", Status: WorkflowPending}}
 	at := time.Unix(2, 0)
@@ -42,6 +86,44 @@ func TestWorkflowTransitionAppendsSequencedEvent(t *testing.T) {
 	}
 	if err := transitionWorkflow(&snapshot, WorkflowPending, at, "illegal"); err == nil {
 		t.Fatal("transitionWorkflow() error = nil, want illegal transition")
+	}
+}
+
+func TestWorkflowTransitionContinuesPersistedEventSequence(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot RunSnapshot
+		want     uint64
+	}{
+		{
+			name: "relation store omits event history",
+			snapshot: RunSnapshot{Run: WorkflowRun{
+				ID:                "run-one",
+				Status:            WorkflowPending,
+				LastEventSequence: 10,
+			}},
+			want: 11,
+		},
+		{
+			name: "legacy file snapshot omits last sequence",
+			snapshot: RunSnapshot{
+				Run:    WorkflowRun{ID: "run-one", Status: WorkflowPending},
+				Events: []StateEvent{{Sequence: 5}},
+			},
+			want: 6,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := tt.snapshot
+			if err := transitionWorkflow(&snapshot, WorkflowRunning, time.Unix(2, 0), "execute"); err != nil {
+				t.Fatalf("transitionWorkflow() error = %v", err)
+			}
+			got := snapshot.Events[len(snapshot.Events)-1].Sequence
+			if got != tt.want || snapshot.Run.LastEventSequence != tt.want {
+				t.Fatalf("event sequence = %d, last_event_sequence = %d, want %d", got, snapshot.Run.LastEventSequence, tt.want)
+			}
+		})
 	}
 }
 

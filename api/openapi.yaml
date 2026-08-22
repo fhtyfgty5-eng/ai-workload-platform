@@ -1,0 +1,595 @@
+openapi: 3.1.0
+info:
+  title: AI Workload Platform Control Plane API
+  version: 1.0.0
+  description: Public control-plane API for versioned workflow definitions and reliable workflow runs.
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /health/live:
+    get:
+      operationId: getLiveness
+      responses:
+        '200':
+          description: The process is running.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+  /health/ready:
+    get:
+      operationId: getReadiness
+      responses:
+        '200':
+          description: The process owns coordination and can serve business requests.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workflows:
+    get:
+      operationId: listWorkflows
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A keyset-paginated page of workflow summaries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      operationId: createWorkflow
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkflowDefinition' }
+      responses:
+        '201':
+          description: The first immutable workflow version was created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DefinitionRef' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workflows/{workflow-id}:
+    get:
+      operationId: getWorkflow
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      responses:
+        '200':
+          description: The bounded summary of a workflow and its latest version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workflows/{workflow-id}/versions:
+    get:
+      operationId: listWorkflowVersions
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A keyset-paginated page of immutable workflow versions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      operationId: createWorkflowVersion
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkflowDefinition' }
+      responses:
+        '201':
+          description: A new immutable workflow version was created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DefinitionRef' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workflows/{workflow-id}/versions/{version}:
+    get:
+      operationId: getWorkflowVersion
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+        - $ref: '#/components/parameters/Version'
+      responses:
+        '200':
+          description: The requested immutable workflow definition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowDefinition' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workflows/{workflow-id}/versions/{version}/runs:
+    post:
+      operationId: startRun
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+        - $ref: '#/components/parameters/Version'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '202':
+          description: A pending Run was durably created and accepted for asynchronous execution.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StartRunResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/runs:
+    get:
+      operationId: listRuns
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: workflow_id
+          in: query
+          required: false
+          description: Return only Runs created from this workflow.
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          description: Return only Runs currently in this workflow status.
+          schema: { $ref: '#/components/schemas/WorkflowStatus' }
+      responses:
+        '200':
+          description: A filtered, keyset-paginated page of bounded Run summaries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/runs/{run-id}:
+    get:
+      operationId: getRun
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          description: The bounded summary of one Run.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/runs/{run-id}/tasks:
+    get:
+      operationId: listTasks
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A stable task-index page without Attempt history.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/runs/{run-id}/tasks/{task-key}:
+    get:
+      operationId: getTask
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/TaskKey'
+      responses:
+        '200':
+          description: One task and its complete Attempt history.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/runs/{run-id}/events:
+    get:
+      operationId: listEvents
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A stable event-sequence page of persisted state transitions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/runs/{run-id}/cancel:
+    post:
+      operationId: cancelRun
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '200':
+          description: The persisted cancellation request for the Run.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CancelRunResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    WorkflowID:
+      name: workflow-id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    Version:
+      name: version
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    RunID:
+      name: run-id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    TaskKey:
+      name: task-key
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Identifies one retryable mutation request for the authenticated principal.
+      schema: { type: string, minLength: 1 }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque keyset cursor returned by the same resource, scope, and filters.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+  responses:
+    BadRequest:
+      description: The request syntax, parameters, cursor, or workflow definition are invalid.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unauthorized:
+      description: The Bearer token is missing or invalid.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: The authenticated role cannot perform this operation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: The requested workflow, version, Run, or task does not exist.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Conflict:
+      description: The resource already exists or the idempotency key conflicts with an earlier request.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    InternalError:
+      description: The server could not complete the operation because of an internal error.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ServiceUnavailable:
+      description: The process is not ready to serve business requests.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [live, ready]
+    RetryPolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        max_attempts: { type: integer, minimum: 1, default: 1 }
+        interval_ms: { type: integer, minimum: 0, default: 0 }
+    TaskDefinition:
+      type: object
+      additionalProperties: false
+      required: [key, action, timeout_ms]
+      properties:
+        key: { type: string, pattern: '^[a-z0-9_-]{1,64}$' }
+        action: { type: string, minLength: 1 }
+        depends_on:
+          type: array
+          items: { type: string, pattern: '^[a-z0-9_-]{1,64}$' }
+          default: []
+        retry: { $ref: '#/components/schemas/RetryPolicy' }
+        timeout_ms: { type: integer, format: int64, minimum: 1 }
+    WorkflowDefinition:
+      type: object
+      additionalProperties: false
+      required: [id, concurrency, tasks]
+      properties:
+        id: { type: string, pattern: '^[a-z0-9_-]{1,64}$' }
+        concurrency: { type: integer, minimum: 1 }
+        tasks:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items: { $ref: '#/components/schemas/TaskDefinition' }
+    DefinitionRef:
+      type: object
+      additionalProperties: false
+      required: [workflow_id, version]
+      properties:
+        workflow_id: { type: string }
+        version: { type: integer, minimum: 1 }
+    WorkflowSummary:
+      type: object
+      additionalProperties: false
+      required: [workflow_id, latest_version, created_at, created_by]
+      properties:
+        workflow_id: { type: string }
+        latest_version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+    WorkflowPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/WorkflowSummary' }
+        next_cursor: { type: string }
+    VersionSummary:
+      type: object
+      additionalProperties: false
+      required: [workflow_id, version, created_at, created_by]
+      properties:
+        workflow_id: { type: string }
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+    VersionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/VersionSummary' }
+        next_cursor: { type: string }
+    WorkflowStatus:
+      type: string
+      enum: [pending, running, succeeded, failed, canceled]
+    StartRunResponse:
+      type: object
+      additionalProperties: false
+      required: [run_id, status]
+      properties:
+        run_id: { type: string }
+        status:
+          type: string
+          enum: [pending]
+    RunSummary:
+      type: object
+      additionalProperties: false
+      required: [run_id, workflow_id, workflow_version, status, revision, task_count, created_at]
+      properties:
+        run_id: { type: string }
+        workflow_id: { type: string }
+        workflow_version: { type: integer, minimum: 1 }
+        status: { $ref: '#/components/schemas/WorkflowStatus' }
+        revision: { type: integer, format: int64, minimum: 0 }
+        task_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    RunPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/RunSummary' }
+        next_cursor: { type: string }
+    CancelRunResponse:
+      type: object
+      additionalProperties: false
+      required: [run_id, status, cancel_requested_at]
+      properties:
+        run_id: { type: string }
+        status: { $ref: '#/components/schemas/WorkflowStatus' }
+        cancel_requested_at: { type: string, format: date-time }
+    TaskStatus:
+      type: string
+      enum: [waiting_dependencies, ready, running, waiting_retry, succeeded, failed, canceled, skipped]
+    AttemptStatus:
+      type: string
+      enum: [running, succeeded, failed, timed_out, canceled, interrupted]
+    ExecutionResult:
+      type: object
+      additionalProperties: false
+      properties:
+        output: { type: string }
+        error_code: { type: string }
+        error_message: { type: string }
+    Attempt:
+      type: object
+      additionalProperties: false
+      required: [number, status, started_at, result]
+      properties:
+        number: { type: integer, minimum: 1 }
+        status: { $ref: '#/components/schemas/AttemptStatus' }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        result: { $ref: '#/components/schemas/ExecutionResult' }
+    TaskSummary:
+      type: object
+      additionalProperties: false
+      required: [key, status]
+      properties:
+        key: { type: string }
+        status: { $ref: '#/components/schemas/TaskStatus' }
+        ready_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    TaskRun:
+      type: object
+      additionalProperties: false
+      required: [key, status, attempts]
+      properties:
+        key: { type: string }
+        status: { $ref: '#/components/schemas/TaskStatus' }
+        attempts:
+          type: array
+          items: { $ref: '#/components/schemas/Attempt' }
+        ready_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    TaskPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TaskSummary' }
+        next_cursor: { type: string }
+    TaskDetail:
+      type: object
+      additionalProperties: false
+      required: [task]
+      properties:
+        task: { $ref: '#/components/schemas/TaskRun' }
+    StateEvent:
+      type: object
+      additionalProperties: false
+      required: [sequence, at, entity, key, from, to]
+      properties:
+        sequence: { type: integer, format: int64, minimum: 1 }
+        at: { type: string, format: date-time }
+        entity: { type: string, enum: [workflow, task, attempt] }
+        key: { type: string }
+        from: { type: string }
+        to: { type: string }
+        reason: { type: string }
+    EventPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/StateEvent' }
+        next_cursor: { type: string }
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        request_id: { type: string }
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { $ref: '#/components/schemas/ErrorDetail' }

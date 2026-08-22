@@ -401,11 +401,11 @@ func mustCompile(t *testing.T, definition WorkflowDefinition) *CompiledWorkflow 
 	return compiled
 }
 
-func newTestEngine(store Store, executor Executor) *Engine {
+func newTestEngine(store RunStore, executor Executor) *Engine {
 	return newTestEngineWithClock(store, executor, RealClock{})
 }
 
-func newTestEngineWithClock(store Store, executor Executor, clock Clock) *Engine {
+func newTestEngineWithClock(store RunStore, executor Executor, clock Clock) *Engine {
 	engine, err := NewEngine(store, executor, EngineOptions{
 		Clock: clock,
 		NewRunID: func() (RunID, error) {

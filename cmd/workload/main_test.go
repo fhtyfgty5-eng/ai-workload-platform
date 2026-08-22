@@ -72,6 +72,48 @@ func TestStatusCommandReadsPersistedSnapshot(t *testing.T) {
 	}
 }
 
+func TestLocalRunCommandExecutesExampleAndPrintsRunID(t *testing.T) {
+	dataDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+
+	exitCode := run(
+		context.Background(),
+		[]string{"local", "run", filepath.Join("..", "..", "examples", "document-pipeline.json")},
+		dataDir,
+		&stdout,
+		&stderr,
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("run_id=")) ||
+		!bytes.Contains(stdout.Bytes(), []byte("status=succeeded")) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestLocalStatusCommandReadsPersistedSnapshot(t *testing.T) {
+	dataDir := t.TempDir()
+	runID := createSucceededRunForCLI(t, dataDir)
+	var stdout, stderr bytes.Buffer
+
+	exitCode := run(
+		context.Background(),
+		[]string{"local", "status", string(runID)},
+		dataDir,
+		&stdout,
+		&stderr,
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"status":"succeeded"`)) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestRunCommandRejectsInvalidArguments(t *testing.T) {
 	tests := []struct {
 		name string
@@ -94,6 +136,26 @@ func TestRunCommandRejectsInvalidArguments(t *testing.T) {
 				t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func TestControlPlaneCommandRequiresServerTokenAndIdempotencyKey(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if exit := runWithEnvironment(context.Background(), []string{"workflow", "create", "workflow.json"}, &stdout, &stderr, func(string) string { return "" }); exit != 2 {
+		t.Fatalf("missing configuration exit = %d, stderr=%q", exit, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exit := runWithEnvironment(context.Background(), []string{"run", "start", "demo", "--version", "1"}, &stdout, &stderr, func(key string) string {
+		if key == "WORKLOAD_SERVER_URL" {
+			return "http://127.0.0.1:1"
+		}
+		if key == "WORKLOAD_TOKEN" {
+			return "token"
+		}
+		return ""
+	}); exit != 2 {
+		t.Fatalf("missing key exit = %d, stderr=%q", exit, stderr.String())
 	}
 }
 

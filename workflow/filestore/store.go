@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
@@ -23,6 +24,8 @@ type Store struct {
 	// rename 生产环境使用 os.Rename，保留为字段以注入替换失败测试。
 	rename func(string, string) error
 }
+
+var _ workflow.Persistence = (*Store)(nil)
 
 // New 创建仅支持 macOS 和 Linux 原子替换语义的文件 Store。
 func New(dir string) (*Store, error) {
@@ -76,6 +79,85 @@ func (s *Store) Save(ctx context.Context, snapshot workflow.RunSnapshot) error {
 		return err
 	}
 	return s.writeLocked(ctx, path, snapshot)
+}
+
+// Apply rebuilds and atomically replaces a full file snapshot from row-level changes.
+func (s *Store) Apply(ctx context.Context, change workflow.ChangeSet) error {
+	path, err := s.path(change.RunID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot, err := s.loadLocked(path, change.RunID)
+	if err != nil {
+		return err
+	}
+	if snapshot.Run.Revision != change.ExpectedRevision {
+		return workflow.ErrRevisionConflict
+	}
+	after, err := workflow.ApplyChangeSetForStore(snapshot, change)
+	if err != nil {
+		return err
+	}
+	return s.writeLocked(ctx, path, after)
+}
+
+// ListNonTerminal returns Runs in this directory that require startup recovery.
+func (s *Store) ListNonTerminal(ctx context.Context) ([]workflow.RunID, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]workflow.RunID, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		id := workflow.RunID(strings.TrimSuffix(entry.Name(), ".json"))
+		snapshot, err := s.Load(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !workflow.IsWorkflowTerminalForStore(snapshot.Run.Status) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// RequestCancel durably records the first cancellation request for a non-terminal Run.
+func (s *Store) RequestCancel(ctx context.Context, id workflow.RunID, at time.Time) (workflow.WorkflowRun, error) {
+	if err := ctx.Err(); err != nil {
+		return workflow.WorkflowRun{}, err
+	}
+	path, err := s.path(id)
+	if err != nil {
+		return workflow.WorkflowRun{}, err
+	}
+
+	// 取消的读取、幂等判断和写回必须共用一个临界区，否则并发请求会同时基于旧 revision 提交。
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot, err := s.loadLocked(path, id)
+	if err != nil {
+		return workflow.WorkflowRun{}, err
+	}
+	if workflow.IsWorkflowTerminalForStore(snapshot.Run.Status) {
+		return snapshot.Run, nil
+	}
+	if snapshot.Run.CancelRequestedAt != nil {
+		return snapshot.Run, nil
+	}
+	snapshot.Run.CancelRequestedAt = &at
+	snapshot.Run.Revision++
+	if err := s.writeLocked(ctx, path, snapshot); err != nil {
+		return workflow.WorkflowRun{}, err
+	}
+	return snapshot.Run, nil
 }
 
 // writeLocked 以原子替换方式写入完整快照；调用方必须持有 s.mu。
@@ -132,6 +214,13 @@ func (s *Store) Load(ctx context.Context, id workflow.RunID) (workflow.RunSnapsh
 	if err != nil {
 		return workflow.RunSnapshot{}, err
 	}
+	return s.loadPath(ctx, path, id)
+}
+
+func (s *Store) loadPath(ctx context.Context, path string, expectedID workflow.RunID) (workflow.RunSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return workflow.RunSnapshot{}, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return workflow.RunSnapshot{}, workflow.ErrRunNotFound
@@ -143,5 +232,12 @@ func (s *Store) Load(ctx context.Context, id workflow.RunID) (workflow.RunSnapsh
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return workflow.RunSnapshot{}, fmt.Errorf("decode snapshot: %w", err)
 	}
+	if snapshot.Run.ID != expectedID {
+		return workflow.RunSnapshot{}, fmt.Errorf("stored run id %q does not match requested run %q", snapshot.Run.ID, expectedID)
+	}
 	return snapshot, nil
+}
+
+func (s *Store) loadLocked(path string, expectedID workflow.RunID) (workflow.RunSnapshot, error) {
+	return s.loadPath(context.Background(), path, expectedID)
 }

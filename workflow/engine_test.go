@@ -533,7 +533,7 @@ func TestEngineRegistersActiveBeforeLoadingSnapshot(t *testing.T) {
 	}
 }
 
-func TestEngineParentContextCancellationCancelsRunningAttempt(t *testing.T) {
+func TestEngineParentContextCancellationInterruptsWithoutPersistingCancellation(t *testing.T) {
 	store := newMemoryStore()
 	executor := newAlwaysBlockingExecutor()
 	engine := newTestEngine(store, executor)
@@ -543,13 +543,23 @@ func TestEngineParentContextCancellationCancelsRunningAttempt(t *testing.T) {
 	waitForSignal(t, executor.started, "running attempt")
 
 	cancel()
-	run := receiveRun(t, done)
-	if run.Status != WorkflowCanceled || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
-		t.Fatalf("workflow = %s, attempt = %s; want canceled, canceled", run.Status, run.Tasks[0].Attempts[0].Status)
+	result := <-done
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", result.err)
+	}
+	stored, err := store.Load(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Run.Status != WorkflowRunning || stored.Run.CancelRequestedAt != nil {
+		t.Fatalf("stored Run = %+v, want running without cancellation request", stored.Run)
+	}
+	if got := stored.Run.Tasks[0].Attempts[0].Status; got != AttemptRunning {
+		t.Fatalf("stored attempt = %s, want running for restart recovery", got)
 	}
 }
 
-func TestEngineParentDeadlineCancelsRunningAttempt(t *testing.T) {
+func TestEngineParentDeadlineInterruptsWithoutPersistingCancellation(t *testing.T) {
 	store := newMemoryStore()
 	executor := newAlwaysBlockingExecutor()
 	engine := newTestEngine(store, executor)
@@ -559,9 +569,19 @@ func TestEngineParentDeadlineCancelsRunningAttempt(t *testing.T) {
 	done := executeAsyncWithContext(engine, ctx, id)
 	waitForSignal(t, executor.started, "running attempt")
 
-	run := receiveRun(t, done)
-	if run.Status != WorkflowCanceled || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
-		t.Fatalf("workflow = %s, attempt = %s; want canceled, canceled", run.Status, run.Tasks[0].Attempts[0].Status)
+	result := <-done
+	if !errors.Is(result.err, context.DeadlineExceeded) {
+		t.Fatalf("Execute() error = %v, want context.DeadlineExceeded", result.err)
+	}
+	stored, err := store.Load(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Run.Status != WorkflowRunning || stored.Run.CancelRequestedAt != nil {
+		t.Fatalf("stored Run = %+v, want running without cancellation request", stored.Run)
+	}
+	if got := stored.Run.Tasks[0].Attempts[0].Status; got != AttemptRunning {
+		t.Fatalf("stored attempt = %s, want running for restart recovery", got)
 	}
 }
 
@@ -834,7 +854,7 @@ func TestEngineCancelDuringSuccessSaveDoesNotCreateSuccessorAttempt(t *testing.T
 	}
 }
 
-func TestEngineParentCancellationDuringResultSavePersistsCanceledState(t *testing.T) {
+func TestEngineParentCancellationDuringResultSaveDoesNotPersistCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Create、WorkflowRunning、AttemptRunning 成功，在成功结果 Save 前取消父 Context。
@@ -842,11 +862,15 @@ func TestEngineParentCancellationDuringResultSavePersistsCanceledState(t *testin
 	engine := newTestEngine(store, newRecordingExecutor(nil))
 	id := createSingleTaskRun(t, engine, RetryPolicy{MaxAttempts: 1}, 1000)
 
-	run, err := engine.Execute(ctx, id)
+	_, err := engine.Execute(ctx, id)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	stored, err := store.Load(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskCanceled || run.Tasks[0].Attempts[0].Status != AttemptCanceled {
-		t.Fatalf("run = %+v, want parent cancellation persisted", run)
+	if stored.Run.Status != WorkflowRunning || stored.Run.Tasks[0].Status != TaskRunning || stored.Run.Tasks[0].Attempts[0].Status != AttemptRunning {
+		t.Fatalf("stored Run = %+v, want last committed running snapshot", stored.Run)
 	}
 }

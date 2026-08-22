@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -670,22 +671,16 @@ func TestResumeReleasesActiveAfterFailure(t *testing.T) {
 	}
 }
 
-func TestResumeParentCancellationPersistsCanceledState(t *testing.T) {
+func TestResumeParentContextInterruptionDoesNotPersistCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	store := newCancelOnSaveStore(1, cancel)
 	store.snapshots["run-one"] = runningSnapshotWithOneAttempt(t, "run-one", RetryPolicy{MaxAttempts: 2})
 	executor := newRecordingExecutor(nil)
 	engine := newTestEngine(store, executor)
 
-	run, err := engine.Resume(ctx, "run-one")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if run.Status != WorkflowCanceled || run.Tasks[0].Status != TaskCanceled {
-		t.Fatalf("workflow = %s, task = %s; want canceled", run.Status, run.Tasks[0].Status)
-	}
-	if got := run.Tasks[0].Attempts[0].Status; got != AttemptCanceled {
-		t.Fatalf("attempt = %s, want canceled instead of interrupted", got)
+	_, err := engine.Resume(ctx, "run-one")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Resume() error = %v, want context.Canceled", err)
 	}
 	if got := executor.callCount(); got != 0 {
 		t.Fatalf("executor call count = %d, want 0", got)
@@ -694,8 +689,11 @@ func TestResumeParentCancellationPersistsCanceledState(t *testing.T) {
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
-	if stored.Run.Status != WorkflowCanceled {
-		t.Fatalf("stored status = %s, want canceled", stored.Run.Status)
+	if stored.Run.Status != WorkflowRunning || stored.Run.CancelRequestedAt != nil {
+		t.Fatalf("stored Run = %+v, want running without cancellation request", stored.Run)
+	}
+	if got := stored.Run.Tasks[0].Attempts[0].Status; got != AttemptRunning {
+		t.Fatalf("stored attempt = %s, want running for restart recovery", got)
 	}
 }
 

@@ -9,14 +9,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/pkg/workloadclient"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow/filestore"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow/mockexec"
 )
 
-const usage = "usage: workload run <workflow.json> | workload status <run-id>"
+const usage = "usage: workload local run <workflow.json> | workload local status <run-id>"
 
 type executorFactory func(workflow.WorkflowDefinition) workflow.Executor
 
@@ -33,9 +35,116 @@ func main() {
 
 // run 执行单次 CLI 调用并返回进程退出码，显式传入输入输出以便自动化测试。
 func run(ctx context.Context, args []string, dataDir string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "local" {
+		return runWithExecutorFactory(ctx, args[1:], dataDir, stdout, stderr, func(definition workflow.WorkflowDefinition) workflow.Executor {
+			return mockexec.New(workflow.RealClock{}, successScripts(definition))
+		})
+	}
+	if len(args) > 0 && (args[0] == "workflow" || (args[0] == "run" && len(args) > 1 && (args[1] == "start" || args[1] == "status" || args[1] == "cancel"))) {
+		return runWithEnvironment(ctx, args, stdout, stderr, os.Getenv)
+	}
+	// 模块 1 的无前缀 run/status 继续作为兼容入口，公开文档统一使用 local 命名空间。
 	return runWithExecutorFactory(ctx, args, dataDir, stdout, stderr, func(definition workflow.WorkflowDefinition) workflow.Executor {
 		return mockexec.New(workflow.RealClock{}, successScripts(definition))
 	})
+}
+
+func runWithEnvironment(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+	serverURL := getenv("WORKLOAD_SERVER_URL")
+	token := getenv("WORKLOAD_TOKEN")
+	if serverURL == "" || token == "" {
+		fmt.Fprintln(stderr, "WORKLOAD_SERVER_URL and WORKLOAD_TOKEN are required")
+		return 2
+	}
+	client := workloadclient.New(serverURL, token)
+	if len(args) == 5 && args[0] == "workflow" && args[1] == "create" {
+		key, ok := idempotencyArg(args[3:])
+		if !ok {
+			fmt.Fprintln(stderr, "--idempotency-key is required")
+			return 2
+		}
+		definition, err := readDefinition(args[2])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		ref, err := client.CreateWorkflow(ctx, key, definition)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return encodeResult(stdout, ref)
+	}
+	if len(args) == 6 && args[0] == "workflow" && args[1] == "add-version" {
+		key, ok := idempotencyArg(args[4:])
+		if !ok {
+			fmt.Fprintln(stderr, "--idempotency-key is required")
+			return 2
+		}
+		definition, err := readDefinition(args[3])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		ref, err := client.CreateWorkflowVersion(ctx, args[2], key, definition)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return encodeResult(stdout, ref)
+	}
+	if len(args) >= 5 && args[0] == "run" && args[1] == "start" {
+		version, key, ok := parseStartArgs(args[3:])
+		if !ok {
+			fmt.Fprintln(stderr, "--version and --idempotency-key are required")
+			return 2
+		}
+		response, err := client.StartRun(ctx, args[2], version, key)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return encodeResult(stdout, response)
+	}
+	if len(args) == 3 && args[0] == "run" && args[1] == "status" {
+		response, err := client.GetRun(ctx, workflow.RunID(args[2]))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return encodeResult(stdout, response)
+	}
+	if len(args) == 3 && args[0] == "run" && args[1] == "cancel" {
+		if err := client.CancelRun(ctx, workflow.RunID(args[2])); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintln(stderr, "unsupported control-plane command")
+	return 2
+}
+
+func idempotencyArg(args []string) (string, bool) {
+	if len(args) == 2 && args[0] == "--idempotency-key" && args[1] != "" {
+		return args[1], true
+	}
+	return "", false
+}
+
+func parseStartArgs(args []string) (int, string, bool) {
+	if len(args) != 4 || args[0] != "--version" || args[2] != "--idempotency-key" || args[1] == "" || args[3] == "" {
+		return 0, "", false
+	}
+	version, err := strconv.Atoi(args[1])
+	return version, args[3], err == nil && version > 0
+}
+
+func encodeResult(stdout io.Writer, value any) int {
+	if err := json.NewEncoder(stdout).Encode(value); err != nil {
+		return 1
+	}
+	return 0
 }
 
 // runWithExecutorFactory 保持命令路径不变，同时允许取消测试注入可控 Executor。
@@ -91,7 +200,18 @@ func runWithExecutorFactory(
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	runState, err := engine.Execute(ctx, id)
+	// CLI 的信号表示用户主动停止本次本地 Run，因此显式转为业务取消；Engine 的父 Context
+	// 留给服务进程安全退出使用，不能把基础设施中断误记成用户取消。
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = engine.Cancel(context.WithoutCancel(ctx), id)
+		case <-watchDone:
+		}
+	}()
+	runState, err := engine.Execute(context.Background(), id)
+	close(watchDone)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

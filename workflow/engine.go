@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -17,10 +18,17 @@ type EngineOptions struct {
 	NewRunID func() (RunID, error)
 }
 
+var errBusinessCancel = errors.New("workflow business cancellation requested")
+
+// activeRunControl 保存活动 Run 的停止入口；停止原因决定是否写入业务取消终态。
+type activeRunControl struct {
+	stop context.CancelCauseFunc
+}
+
 // Engine 串行提交单个 Run 的状态，并在定义的并发上限内协调 Executor。
 type Engine struct {
 	// store 是所有可恢复状态的事实来源，executor 只负责执行一次 Attempt。
-	store    Store
+	store    enginePersistence
 	executor Executor
 	// clock 和 newRunID 是可替换的系统依赖，不保存业务状态。
 	clock    Clock
@@ -28,16 +36,20 @@ type Engine struct {
 
 	// mu 同时保护 active 和 compiled；单 Run 事件循环不依赖该锁提交状态。
 	mu sync.Mutex
-	// active 保存当前进程内正在 Execute 或 Resume 的 Run 取消函数，防止同一 Run 被重复调度。
-	active map[RunID]context.CancelFunc
+	// active 保存当前进程内正在 Execute 或 Resume 的 Run 控制器，防止同一 Run 被重复调度。
+	active map[RunID]activeRunControl
 	// compiled 缓存可跨 Run 共享的只读编译结果；终态 Run 会释放对应条目。
 	compiled map[RunID]*CompiledWorkflow
 }
 
-// NewEngine 使用显式 Store、Executor 和可选依赖创建工作流内核。
-func NewEngine(store Store, executor Executor, options EngineOptions) (*Engine, error) {
+// NewEngine 使用显式 RunStore、Executor 和可选依赖创建工作流内核。
+func NewEngine(store RunStore, executor Executor, options EngineOptions) (*Engine, error) {
 	if store == nil || executor == nil {
 		return nil, fmt.Errorf("store and executor are required")
+	}
+	persistence, err := asEnginePersistence(store)
+	if err != nil {
+		return nil, err
 	}
 	if options.Clock == nil {
 		options.Clock = RealClock{}
@@ -46,13 +58,20 @@ func NewEngine(store Store, executor Executor, options EngineOptions) (*Engine, 
 		options.NewRunID = randomRunID
 	}
 	return &Engine{
-		store:    store,
+		store:    persistence,
 		executor: executor,
 		clock:    options.Clock,
 		newRunID: options.NewRunID,
-		active:   make(map[RunID]context.CancelFunc),
+		active:   make(map[RunID]activeRunControl),
 		compiled: make(map[RunID]*CompiledWorkflow),
 	}, nil
+}
+
+// saveSnapshot 在候选状态上分配下一 revision，并把前后差异作为一个原子变更集提交。
+func (e *Engine) saveSnapshot(ctx context.Context, before RunSnapshot, after *RunSnapshot) error {
+	after.Run.Revision = before.Run.Revision + 1
+	after.Run.LastEventSequence = snapshotLastEventSequence(*after)
+	return e.store.Apply(ctx, changeSetFromSnapshots(before, *after))
 }
 
 // CreateRun 持久化独立运行快照，并缓存可由同一进程后续调度共享的编译结果。
@@ -75,61 +94,83 @@ func (e *Engine) CreateRun(ctx context.Context, compiled *CompiledWorkflow) (Run
 	return id, nil
 }
 
-// registerActiveRun 建立单 Run 的取消 Context，并在返回的 release 中释放 active 所有权。
+// registerActiveRun 建立可携带停止原因的单 Run Context，并在 release 中释放 active 所有权。
 // active 在 Store.Load 前登记，避免 Cancel 基于旧快照并发写入后被 Execute 或 Resume 覆盖。
-func (e *Engine) registerActiveRun(ctx context.Context, id RunID) (context.Context, context.CancelFunc, func(), error) {
-	runCtx, cancel := context.WithCancel(ctx)
+func (e *Engine) registerActiveRun(ctx context.Context, id RunID) (context.Context, context.CancelCauseFunc, func(), error) {
+	runCtx, stop := context.WithCancelCause(ctx)
 	e.mu.Lock()
 	if _, exists := e.active[id]; exists {
 		e.mu.Unlock()
-		cancel()
+		stop(context.Canceled)
 		return nil, nil, nil, fmt.Errorf("run %q is already executing", id)
 	}
-	e.active[id] = cancel
+	e.active[id] = activeRunControl{stop: stop}
 	e.mu.Unlock()
 	release := func() {
-		cancel()
+		stop(context.Canceled)
 		e.mu.Lock()
 		delete(e.active, id)
 		e.mu.Unlock()
 	}
-	return runCtx, cancel, release, nil
+	return runCtx, stop, release, nil
+}
+
+// stoppedRunResult 根据停止原因区分业务取消与基础设施中断，避免把进程退出误记为用户取消。
+func (e *Engine) stoppedRunResult(ctx context.Context, runCtx context.Context, snapshot RunSnapshot) (WorkflowRun, error) {
+	cause := context.Cause(runCtx)
+	if errors.Is(cause, errBusinessCancel) {
+		return e.finalizeCancellation(context.WithoutCancel(ctx), snapshot)
+	}
+	if cause == nil {
+		cause = context.Canceled
+	}
+	return WorkflowRun{}, cause
 }
 
 // Execute 调度指定 Run 的可执行任务，直到工作流成功、失败或发生系统错误。
 func (e *Engine) Execute(ctx context.Context, id RunID) (WorkflowRun, error) {
-	runCtx, cancel, release, err := e.registerActiveRun(ctx, id)
+	runCtx, stop, release, err := e.registerActiveRun(ctx, id)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
 	defer release()
 
-	// 父 Context 可能在加载前已取消；仍需读取事实快照，才能把非终态 Run 持久化为 canceled。
+	// 即使父 Context 已取消也读取事实快照，以便判断终态或已持久化的业务取消请求。
 	snapshot, err := e.store.Load(context.WithoutCancel(ctx), id)
 	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if err := validateStoredRunID(snapshot, id); err != nil {
 		return WorkflowRun{}, err
 	}
 	if isWorkflowTerminal(snapshot.Run.Status) {
 		return snapshot.Run, nil
 	}
-	if runCtx.Err() != nil {
+	if snapshot.Run.CancelRequestedAt != nil {
 		return e.finalizeCancellation(ctx, snapshot)
+	}
+	if runCtx.Err() != nil {
+		return e.stoppedRunResult(ctx, runCtx, snapshot)
 	}
 	compiled, err := e.compiledForRun(id, snapshot)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
 	if runCtx.Err() != nil {
-		return e.finalizeCancellation(ctx, snapshot)
+		return e.stoppedRunResult(ctx, runCtx, snapshot)
 	}
-	return e.executeSnapshot(ctx, runCtx, cancel, compiled, snapshot)
+	run, err := e.executeSnapshot(ctx, runCtx, stop, compiled, snapshot)
+	if err == nil {
+		return run, nil
+	}
+	return e.reconcilePersistedCancellation(ctx, id, err)
 }
 
 // executeSnapshot 是 Execute 与 Resume 共用的单 Run 调度核心；调用方负责 active 生命周期。
 func (e *Engine) executeSnapshot(
 	ctx context.Context,
 	runCtx context.Context,
-	cancel context.CancelFunc,
+	stop context.CancelCauseFunc,
 	compiled *CompiledWorkflow,
 	snapshot RunSnapshot,
 ) (WorkflowRun, error) {
@@ -139,15 +180,15 @@ func (e *Engine) executeSnapshot(
 		if err := transitionWorkflow(&updated, WorkflowRunning, e.clock.Now(), "execution started"); err != nil {
 			return WorkflowRun{}, err
 		}
-		if err := e.store.Save(ctx, updated); err != nil {
+		if err := e.saveSnapshot(ctx, snapshot, &updated); err != nil {
 			if runCtx.Err() != nil {
-				return e.finalizeCancellation(ctx, snapshot)
+				return e.stoppedRunResult(ctx, runCtx, snapshot)
 			}
 			return WorkflowRun{}, err
 		}
 		snapshot = updated
 		if runCtx.Err() != nil {
-			return e.finalizeCancellation(ctx, snapshot)
+			return e.stoppedRunResult(ctx, runCtx, snapshot)
 		}
 	}
 
@@ -187,7 +228,7 @@ func (e *Engine) executeSnapshot(
 			if err != nil {
 				return err
 			}
-			if err := e.store.Save(ctx, updated); err != nil {
+			if err := e.saveSnapshot(ctx, snapshot, &updated); err != nil {
 				return err
 			}
 			// 保存成功后才提交内存快照并启动外部执行，保证崩溃恢复至少能看到 running Attempt。
@@ -212,23 +253,23 @@ func (e *Engine) executeSnapshot(
 
 	if err := startReadyTasks(); err != nil {
 		if runCtx.Err() != nil {
-			return e.finalizeCancellation(ctx, snapshot)
+			return e.stoppedRunResult(ctx, runCtx, snapshot)
 		}
 		return WorkflowRun{}, err
 	}
 	// 事件循环串行处理完成、超时和重试到期，避免多个 goroutine 并发修改同一快照。
 	for {
-		// Run 取消优先于业务完成、Attempt 超时和重试到期，统一由事件循环写入取消终态。
+		// 停止信号优先于业务完成、Attempt 超时和重试到期，再按原因决定是否写业务取消。
 		if runCtx.Err() != nil {
-			return e.finalizeCancellation(ctx, snapshot)
+			return e.stoppedRunResult(ctx, runCtx, snapshot)
 		}
 		if running > 0 {
 			select {
 			case <-runCtx.Done():
-				return e.finalizeCancellation(ctx, snapshot)
+				return e.stoppedRunResult(ctx, runCtx, snapshot)
 			case completion := <-completions:
 				if runCtx.Err() != nil {
-					return e.finalizeCancellation(ctx, snapshot)
+					return e.stoppedRunResult(ctx, runCtx, snapshot)
 				}
 				// 活动表中不存在的键属于已超时或已结算 Attempt 的迟到结果，直接丢弃。
 				key := attemptKey{taskIndex: completion.taskIndex, attempt: completion.attempt}
@@ -238,8 +279,8 @@ func (e *Engine) executeSnapshot(
 				running--
 				if completion.response.Kind == ResultCanceled {
 					// 单个 Executor 主动取消同样结束整个 Run；先通知其他 Attempt，再统一保存取消终态。
-					cancel()
-					return e.finalizeCancellation(ctx, snapshot)
+					stop(errBusinessCancel)
+					return e.stoppedRunResult(ctx, runCtx, snapshot)
 				}
 				updated := cloneRunSnapshot(snapshot)
 				applied, err := applyCompletion(&updated, compiled, completion)
@@ -247,9 +288,9 @@ func (e *Engine) executeSnapshot(
 					return WorkflowRun{}, err
 				}
 				if applied {
-					if err := e.store.Save(ctx, updated); err != nil {
+					if err := e.saveSnapshot(ctx, snapshot, &updated); err != nil {
 						if runCtx.Err() != nil {
-							return e.finalizeCancellation(ctx, snapshot)
+							return e.stoppedRunResult(ctx, runCtx, snapshot)
 						}
 						return WorkflowRun{}, err
 					}
@@ -261,7 +302,7 @@ func (e *Engine) executeSnapshot(
 				}
 			case timeout := <-timeouts:
 				if runCtx.Err() != nil {
-					return e.finalizeCancellation(ctx, snapshot)
+					return e.stoppedRunResult(ctx, runCtx, snapshot)
 				}
 				// 超时事件先通过活动表的一次性门闩并取消 Executor，再写入快照副本。
 				key := attemptKey{taskIndex: timeout.taskIndex, attempt: timeout.attempt}
@@ -275,9 +316,9 @@ func (e *Engine) executeSnapshot(
 					return WorkflowRun{}, err
 				}
 				if applied {
-					if err := e.store.Save(ctx, updated); err != nil {
+					if err := e.saveSnapshot(ctx, snapshot, &updated); err != nil {
 						if runCtx.Err() != nil {
-							return e.finalizeCancellation(ctx, snapshot)
+							return e.stoppedRunResult(ctx, runCtx, snapshot)
 						}
 						return WorkflowRun{}, err
 					}
@@ -288,7 +329,7 @@ func (e *Engine) executeSnapshot(
 				}
 			case retry := <-retries:
 				if runCtx.Err() != nil {
-					return e.finalizeCancellation(ctx, snapshot)
+					return e.stoppedRunResult(ctx, runCtx, snapshot)
 				}
 				// 计时器只报告“可以重试”；事件循环仍需复核 Attempt 编号和 ReadyAt。
 				updated := cloneRunSnapshot(snapshot)
@@ -297,9 +338,9 @@ func (e *Engine) executeSnapshot(
 					return WorkflowRun{}, err
 				}
 				if applied {
-					if err := e.store.Save(ctx, updated); err != nil {
+					if err := e.saveSnapshot(ctx, snapshot, &updated); err != nil {
 						if runCtx.Err() != nil {
-							return e.finalizeCancellation(ctx, snapshot)
+							return e.stoppedRunResult(ctx, runCtx, snapshot)
 						}
 						return WorkflowRun{}, err
 					}
@@ -308,7 +349,7 @@ func (e *Engine) executeSnapshot(
 			}
 			if err := startReadyTasks(); err != nil {
 				if runCtx.Err() != nil {
-					return e.finalizeCancellation(ctx, snapshot)
+					return e.stoppedRunResult(ctx, runCtx, snapshot)
 				}
 				return WorkflowRun{}, err
 			}
@@ -322,10 +363,10 @@ func (e *Engine) executeSnapshot(
 		var retry retryReady
 		select {
 		case <-runCtx.Done():
-			return e.finalizeCancellation(ctx, snapshot)
+			return e.stoppedRunResult(ctx, runCtx, snapshot)
 		case retry = <-retries:
 			if runCtx.Err() != nil {
-				return e.finalizeCancellation(ctx, snapshot)
+				return e.stoppedRunResult(ctx, runCtx, snapshot)
 			}
 		}
 		updated := cloneRunSnapshot(snapshot)
@@ -334,9 +375,9 @@ func (e *Engine) executeSnapshot(
 			return WorkflowRun{}, err
 		}
 		if applied {
-			if err := e.store.Save(ctx, updated); err != nil {
+			if err := e.saveSnapshot(ctx, snapshot, &updated); err != nil {
 				if runCtx.Err() != nil {
-					return e.finalizeCancellation(ctx, snapshot)
+					return e.stoppedRunResult(ctx, runCtx, snapshot)
 				}
 				return WorkflowRun{}, err
 			}
@@ -344,7 +385,7 @@ func (e *Engine) executeSnapshot(
 		}
 		if err := startReadyTasks(); err != nil {
 			if runCtx.Err() != nil {
-				return e.finalizeCancellation(ctx, snapshot)
+				return e.stoppedRunResult(ctx, runCtx, snapshot)
 			}
 			return WorkflowRun{}, err
 		}
@@ -363,9 +404,9 @@ func (e *Engine) executeSnapshot(
 	if err := transitionWorkflow(&updated, finalStatus, e.clock.Now(), reason); err != nil {
 		return WorkflowRun{}, err
 	}
-	if err := e.store.Save(ctx, updated); err != nil {
+	if err := e.saveSnapshot(ctx, snapshot, &updated); err != nil {
 		if runCtx.Err() != nil {
-			return e.finalizeCancellation(ctx, snapshot)
+			return e.stoppedRunResult(ctx, runCtx, snapshot)
 		}
 		return WorkflowRun{}, err
 	}
@@ -379,17 +420,27 @@ func (e *Engine) GetRun(ctx context.Context, id RunID) (WorkflowRun, error) {
 	if err != nil {
 		return WorkflowRun{}, err
 	}
+	if err := validateStoredRunID(snapshot, id); err != nil {
+		return WorkflowRun{}, err
+	}
 	return snapshot.Run, nil
+}
+
+func validateStoredRunID(snapshot RunSnapshot, requestedID RunID) error {
+	if snapshot.Run.ID != requestedID {
+		return fmt.Errorf("stored run id %q does not match requested run %q", snapshot.Run.ID, requestedID)
+	}
+	return nil
 }
 
 // Cancel 请求取消指定 Run。活动 Run 由 Execute 或 Resume 收敛状态，非活动 Run 在此直接保存取消快照。
 func (e *Engine) Cancel(ctx context.Context, id RunID) error {
 	e.mu.Lock()
-	cancel, active := e.active[id]
+	control, active := e.active[id]
 	if active {
 		e.mu.Unlock()
 		// nil 只表示请求已送达；最终取消状态仍由当前活动调度流程持久化。
-		cancel()
+		control.stop(errBusinessCancel)
 		return nil
 	}
 	// 未活动检查和快照写入共用 Engine 锁，防止 Execute 同时基于旧快照注册并启动任务。
@@ -404,7 +455,7 @@ func (e *Engine) Cancel(ctx context.Context, id RunID) error {
 	}
 	updated, err := cancellationSnapshot(snapshot, e.clock.Now())
 	if err == nil {
-		err = e.store.Save(ctx, updated)
+		err = e.saveSnapshot(ctx, snapshot, &updated)
 	}
 	if err == nil {
 		delete(e.compiled, id)
@@ -694,16 +745,48 @@ func hasWaitingRetry(tasks []TaskRun) bool {
 
 // finalizeCancellation 在快照副本中取消所有未终止任务，并在保存成功后返回取消终态。
 func (e *Engine) finalizeCancellation(ctx context.Context, snapshot RunSnapshot) (WorkflowRun, error) {
-	updated, err := cancellationSnapshot(snapshot, e.clock.Now())
+	cleanupCtx := context.WithoutCancel(ctx)
+	at := e.clock.Now()
+	for attempt := 0; attempt < 2; attempt++ {
+		if isWorkflowTerminal(snapshot.Run.Status) {
+			e.forgetCompiled(snapshot.Run.ID)
+			return snapshot.Run, nil
+		}
+		updated, err := cancellationSnapshot(snapshot, at)
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+		// 父 Context 可能正是取消来源；清理写入必须保留其值但忽略取消信号。
+		err = e.saveSnapshot(cleanupCtx, snapshot, &updated)
+		if err == nil {
+			e.forgetCompiled(updated.Run.ID)
+			return updated.Run, nil
+		}
+		if !errors.Is(err, ErrRevisionConflict) || attempt == 1 {
+			return WorkflowRun{}, err
+		}
+		// 持久化取消请求会先推进 revision；重新加载后必须在该事实状态上收敛终态。
+		snapshot, err = e.store.Load(cleanupCtx, snapshot.Run.ID)
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+	}
+	return WorkflowRun{}, ErrRevisionConflict
+}
+
+// reconcilePersistedCancellation 只把由已落盘取消请求引起的 revision 冲突转为取消收敛。
+func (e *Engine) reconcilePersistedCancellation(ctx context.Context, id RunID, saveErr error) (WorkflowRun, error) {
+	if !errors.Is(saveErr, ErrRevisionConflict) {
+		return WorkflowRun{}, saveErr
+	}
+	snapshot, err := e.store.Load(context.WithoutCancel(ctx), id)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
-	// 父 Context 可能正是取消来源；清理写入必须保留其值但忽略取消信号。
-	if err := e.store.Save(context.WithoutCancel(ctx), updated); err != nil {
-		return WorkflowRun{}, err
+	if snapshot.Run.CancelRequestedAt == nil {
+		return WorkflowRun{}, saveErr
 	}
-	e.forgetCompiled(updated.Run.ID)
-	return updated.Run, nil
+	return e.finalizeCancellation(ctx, snapshot)
 }
 
 // cancellationSnapshot 使用同一时间点把所有未终止任务和 Workflow 收敛为取消状态。
