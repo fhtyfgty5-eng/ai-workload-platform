@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -43,6 +44,70 @@ func TestRepositoryMigratesAndCreatesVersion(t *testing.T) {
 	if !reflect.DeepEqual(loaded, definition) {
 		t.Fatalf("LoadDefinition() = %+v, want %+v", loaded, definition)
 	}
+}
+
+func TestRepositoryPreservesLargeTaskInputNumber(t *testing.T) {
+	repository := newTestRepository(t)
+	definition := testDefinition()
+	definition.ID = "large-number"
+	definition.Tasks[0].Input = map[string]any{"value": json.Number("9007199254740993")}
+	if _, err := repository.CreateDefinition(context.Background(), definition, "operator", "large-number", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := repository.LoadDefinition(context.Background(), definition.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := loaded.Tasks[0].Input["value"].(json.Number)
+	if !ok || value.String() != "9007199254740993" {
+		t.Fatalf("input value = %#v, want exact json.Number", loaded.Tasks[0].Input["value"])
+	}
+}
+
+func TestRepositoryResumePreservesLargeTaskInputNumber(t *testing.T) {
+	repository := newTestRepository(t)
+	definition := testDefinition()
+	definition.ID = "resume-large-number"
+	definition.Tasks = definition.Tasks[:1]
+	definition.Concurrency = 1
+	definition.Tasks[0].Input = map[string]any{"value": json.Number("9007199254740993")}
+	compiled, err := workflow.Compile(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition = compiled.Definition()
+	if _, err := repository.CreateDefinition(context.Background(), definition, "operator", "resume-large-number", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := workflow.NewRunSnapshotForVersion("run-large-number", compiled, 1, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	executor := &inputCapturingExecutor{requests: make(chan workflow.ExecutionRequest, 1)}
+	engine, err := workflow.NewEngine(repository, executor, workflow.EngineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Resume(context.Background(), snapshot.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	request := <-executor.requests
+	value, ok := request.Input["value"].(json.Number)
+	if !ok || value.String() != "9007199254740993" {
+		t.Fatalf("execution input = %#v, want exact json.Number", request.Input["value"])
+	}
+}
+
+type inputCapturingExecutor struct {
+	requests chan workflow.ExecutionRequest
+}
+
+func (e *inputCapturingExecutor) Execute(_ context.Context, request workflow.ExecutionRequest) workflow.ExecutionResponse {
+	e.requests <- request
+	return workflow.ExecutionResponse{Kind: workflow.ResultSuccess}
 }
 
 func TestRepositoryApplyRejectsStaleRevision(t *testing.T) {

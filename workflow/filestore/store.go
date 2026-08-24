@@ -1,6 +1,7 @@
 package filestore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -229,7 +230,9 @@ func (s *Store) loadPath(ctx context.Context, path string, expectedID workflow.R
 		return workflow.RunSnapshot{}, err
 	}
 	var snapshot workflow.RunSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&snapshot); err != nil {
 		return workflow.RunSnapshot{}, fmt.Errorf("decode snapshot: %w", err)
 	}
 	if snapshot.Run.ID != expectedID {

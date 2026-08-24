@@ -2,6 +2,7 @@ package filestore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -89,6 +90,28 @@ func TestStoreCreateSaveLoad(t *testing.T) {
 	}
 	if loaded.Run.Status != workflow.WorkflowRunning {
 		t.Fatalf("status = %s, want running", loaded.Run.Status)
+	}
+}
+
+func TestStoreLoadPreservesLargeTaskInputNumber(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := workflow.WorkflowDefinition{ID: "large-number", Concurrency: 1, Tasks: []workflow.TaskDefinition{{
+		Key: "one", Action: "run", Input: map[string]any{"value": json.Number("9007199254740993")}, TimeoutMillis: 1000,
+	}}}
+	snapshot := workflow.RunSnapshot{Version: 1, Definition: &definition, Run: workflow.WorkflowRun{ID: "run-large", DefinitionID: definition.ID, Status: workflow.WorkflowPending, CreatedAt: time.Unix(1, 0)}}
+	if err := store.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load(context.Background(), snapshot.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := loaded.Definition.Tasks[0].Input["value"].(json.Number)
+	if !ok || value.String() != "9007199254740993" {
+		t.Fatalf("input value = %#v, want exact json.Number", loaded.Definition.Tasks[0].Input["value"])
 	}
 }
 

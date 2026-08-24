@@ -17,6 +17,8 @@ type TaskDefinition struct {
 	Key TaskKey `json:"key"`
 	// Action 是传给 Executor 的不透明动作名称，工作流内核不会把它解释为命令或代码。
 	Action string `json:"action"`
+	// Input 是传给 Executor 的可选 JSON 对象；内核只校验和复制，不解释其中业务字段。
+	Input map[string]any `json:"input,omitempty"`
 	// DependsOn 列出当前任务必须等待成功的直接上游任务 Key。
 	DependsOn []TaskKey `json:"depends_on,omitempty"`
 	// Retry 决定可重试失败或超时后的最大尝试次数与固定间隔。

@@ -266,6 +266,7 @@ func (c *manualClock) waitForTimers(t *testing.T, count int) {
 type recordedCall struct {
 	action       string
 	definitionID string
+	input        map[string]any
 	sequence     int
 }
 
@@ -285,12 +286,24 @@ func (e *recordingExecutor) Execute(_ context.Context, request ExecutionRequest)
 	e.calls = append(e.calls, recordedCall{
 		action:       request.Action,
 		definitionID: request.DefinitionID,
+		input:        request.Input,
 		sequence:     len(e.calls),
 	})
 	if response, ok := e.responses[request.Action]; ok {
 		return response
 	}
 	return ExecutionResponse{Kind: ResultSuccess}
+}
+
+func (e *recordingExecutor) inputFor(action string) map[string]any {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, call := range e.calls {
+		if call.action == action {
+			return call.input
+		}
+	}
+	return nil
 }
 
 func (e *recordingExecutor) definitionIDFor(action string) string {

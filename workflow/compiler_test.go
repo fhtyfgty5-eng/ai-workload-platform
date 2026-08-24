@@ -1,10 +1,101 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestCompileAcceptsJSONTaskInputAndIsolatesNestedValues(t *testing.T) {
+	input := map[string]any{
+		"source": "article.md",
+		"options": map[string]any{
+			"languages": []any{"zh", "en"},
+		},
+	}
+	compiled, err := Compile(WorkflowDefinition{ID: "input-copy", Concurrency: 1, Tasks: []TaskDefinition{{
+		Key: "read", Action: "read-document", Input: input, TimeoutMillis: 1000,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input["source"] = "changed.md"
+	input["options"].(map[string]any)["languages"].([]any)[0] = "changed"
+	got := compiled.Definition().Tasks[0].Input
+	if got["source"] != "article.md" || got["options"].(map[string]any)["languages"].([]any)[0] != "zh" {
+		t.Fatalf("compiled input = %#v, want isolated original values", got)
+	}
+
+	got["source"] = "caller-change.md"
+	if compiled.Definition().Tasks[0].Input["source"] != "article.md" {
+		t.Fatal("Definition() returned mutable task input shared with compiled definition")
+	}
+}
+
+func TestCompileRejectsUnsupportedTaskInputValue(t *testing.T) {
+	cycle := map[string]any{}
+	cycle["self"] = cycle
+	tests := []struct {
+		name  string
+		input map[string]any
+	}{
+		{name: "function", input: map[string]any{"value": func() {}}},
+		{name: "channel", input: map[string]any{"value": make(chan int)}},
+		{name: "struct", input: map[string]any{"value": struct{ Name string }{Name: "not-json-data-model"}}},
+		{name: "bytes", input: map[string]any{"value": []byte("encoded-as-base64")}},
+		{name: "cycle", input: cycle},
+		{name: "too large", input: map[string]any{"value": strings.Repeat("x", 64*1024)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(WorkflowDefinition{ID: "invalid-input", Concurrency: 1, Tasks: []TaskDefinition{{
+				Key: "task", Action: "run", Input: tt.input, TimeoutMillis: 1000,
+			}}})
+			if err == nil || !strings.Contains(err.Error(), "input") {
+				t.Fatalf("Compile() error = %v, want task input error", err)
+			}
+		})
+	}
+}
+
+func TestCompileRejectsCustomJSONMarshalerWithoutPanicking(t *testing.T) {
+	value := &statefulJSONMarshaler{}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Compile() panicked: %v", recovered)
+		}
+	}()
+	_, err := Compile(WorkflowDefinition{ID: "custom-marshaler", Concurrency: 1, Tasks: []TaskDefinition{{
+		Key: "task", Action: "run", Input: map[string]any{"value": value}, TimeoutMillis: 1000,
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "input") {
+		t.Fatalf("Compile() error = %v, want task input error", err)
+	}
+}
+
+type statefulJSONMarshaler struct{ calls int }
+
+func (m *statefulJSONMarshaler) MarshalJSON() ([]byte, error) {
+	m.calls++
+	if m.calls > 1 {
+		return nil, errors.New("second call fails")
+	}
+	return []byte(`{"accepted":true}`), nil
+}
+
+func TestLegacyTaskDefinitionWithoutInputRemainsValid(t *testing.T) {
+	compiled, err := Compile(WorkflowDefinition{ID: "legacy", Concurrency: 1, Tasks: []TaskDefinition{{
+		Key: "task", Action: "run", TimeoutMillis: 1000,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Definition().Tasks[0].Input != nil {
+		t.Fatalf("Input = %#v, want nil", compiled.Definition().Tasks[0].Input)
+	}
+}
 
 func TestCompileBuildsIndexAndDependencies(t *testing.T) {
 	def := WorkflowDefinition{

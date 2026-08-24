@@ -22,6 +22,8 @@ type ExecutionRequest struct {
 	TaskKey TaskKey
 	// Action 是由具体 Executor 解释的动作名称。
 	Action string
+	// Input 是定义中经过校验并为本次调用隔离复制的结构化任务输入。
+	Input map[string]any
 	// Attempt 是从 1 开始递增的本任务执行尝试编号。
 	Attempt int
 }

@@ -425,10 +425,10 @@ func ensureDefinitionMatches(ctx context.Context, tx pgx.Tx, snapshot workflow.R
 	}
 	var storedValue any
 	var wantedValue any
-	if err := json.Unmarshal(body, &storedValue); err != nil {
+	if err := decodeJSONNumber(body, &storedValue); err != nil {
 		return fmt.Errorf("decode stored Run definition: %w", err)
 	}
-	if err := json.Unmarshal(want, &wantedValue); err != nil {
+	if err := decodeJSONNumber(want, &wantedValue); err != nil {
 		return fmt.Errorf("decode Run definition: %w", err)
 	}
 	if !reflect.DeepEqual(storedValue, wantedValue) {
@@ -507,7 +507,7 @@ func loadSnapshot(ctx context.Context, tx pgx.Tx, id workflow.RunID) (workflow.R
 	snapshot.Run.Revision = uint64(revision)
 	snapshot.Run.LastEventSequence = uint64(lastSequence)
 	var definition workflow.WorkflowDefinition
-	if err := json.Unmarshal(definitionJSON, &definition); err != nil {
+	if err := decodeJSONNumber(definitionJSON, &definition); err != nil {
 		return workflow.RunSnapshot{}, fmt.Errorf("decode stored workflow definition: %w", err)
 	}
 	snapshot.Definition = &definition

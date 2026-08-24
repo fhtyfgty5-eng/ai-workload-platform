@@ -114,6 +114,23 @@ func TestHandlerMapsApplicationInvalidArgumentToBadRequest(t *testing.T) {
 	}
 }
 
+func TestHandlerPreservesLargeTaskInputNumber(t *testing.T) {
+	services := newFakeServices()
+	handler := NewHandler(Dependencies{Workflows: services.workflows, Runs: services.runs, ViewerToken: "viewer-secret", OperatorToken: "operator-secret", Ready: func() bool { return true }})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/workflows", strings.NewReader(`{"id":"demo","concurrency":1,"tasks":[{"key":"one","action":"run","input":{"value":9007199254740993},"timeout_ms":1000}]}`))
+	request.Header.Set("Authorization", "Bearer operator-secret")
+	request.Header.Set("Idempotency-Key", "large-number")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	value, ok := services.workflows.definition.Tasks[0].Input["value"].(json.Number)
+	if !ok || value.String() != "9007199254740993" {
+		t.Fatalf("input value = %#v, want exact json.Number", services.workflows.definition.Tasks[0].Input["value"])
+	}
+}
+
 func TestHandlerRejectsMissingTokenAndViewerCannotCreateWorkflow(t *testing.T) {
 	services := newFakeServices()
 	handler := NewHandler(Dependencies{Workflows: services.workflows, Runs: services.runs, ViewerToken: "viewer-secret", OperatorToken: "operator-secret", Ready: func() bool { return true }})
@@ -233,12 +250,16 @@ func newFakeServices() fakeServices {
 	return fakeServices{workflows: &fakeWorkflowService{}, runs: &fakeRunService{}}
 }
 
-type fakeWorkflowService struct{ createErr error }
+type fakeWorkflowService struct {
+	createErr  error
+	definition workflow.WorkflowDefinition
+}
 
-func (f *fakeWorkflowService) Create(context.Context, string, string, workflow.WorkflowDefinition) (app.DefinitionRef, error) {
+func (f *fakeWorkflowService) Create(_ context.Context, _, _ string, definition workflow.WorkflowDefinition) (app.DefinitionRef, error) {
 	if f.createErr != nil {
 		return app.DefinitionRef{}, f.createErr
 	}
+	f.definition = definition
 	return app.DefinitionRef{WorkflowID: "demo", Version: 1}, nil
 }
 func (*fakeWorkflowService) CreateVersion(context.Context, string, string, string, workflow.WorkflowDefinition) (app.DefinitionRef, error) {

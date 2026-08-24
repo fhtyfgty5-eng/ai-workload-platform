@@ -200,7 +200,9 @@ func (c *Client) doJSON(ctx context.Context, method, path, idempotencyKey string
 	if responseBody == nil {
 		return nil
 	}
-	if err := json.NewDecoder(limited).Decode(responseBody); err != nil {
+	decoder := json.NewDecoder(limited)
+	decoder.UseNumber()
+	if err := decoder.Decode(responseBody); err != nil {
 		return fmt.Errorf("decode API response: %w", err)
 	}
 	return nil

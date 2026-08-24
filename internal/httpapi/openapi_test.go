@@ -127,6 +127,15 @@ func TestOpenAPIOperationsHaveSecurityErrorsParametersAndResolvableRefs(t *testi
 	}
 }
 
+func TestOpenAPITaskDefinitionDocumentsStructuredInput(t *testing.T) {
+	document, _ := loadOpenAPI(t)
+	task := document.Components.Schemas["TaskDefinition"]
+	input := mappingValue(mappingValue(task, "properties"), "input")
+	if scalar(mappingValue(input, "type")) != "object" || scalar(mappingValue(input, "additionalProperties")) != "true" {
+		t.Fatalf("TaskDefinition.input schema = %v, want object with arbitrary JSON properties", input)
+	}
+}
+
 func loadOpenAPI(t *testing.T) (openAPIDocument, *yaml.Node) {
 	t.Helper()
 	body, err := os.ReadFile("../../api/openapi.yaml")

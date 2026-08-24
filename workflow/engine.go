@@ -529,6 +529,7 @@ func (e *Engine) prepareTask(snapshot *RunSnapshot, compiled *CompiledWorkflow, 
 		RunID:        snapshot.Run.ID,
 		TaskKey:      definition.Key,
 		Action:       definition.Action,
+		Input:        cloneTaskInput(definition.Input),
 		Attempt:      attempt.Number,
 	}, attempt.Number, nil
 }

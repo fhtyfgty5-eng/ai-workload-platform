@@ -57,6 +57,30 @@ func TestEnginePassesDefinitionIDToExecutor(t *testing.T) {
 	}
 }
 
+func TestExecutionRequestCarriesTaskInputToExecutor(t *testing.T) {
+	store := newMemoryStore()
+	executor := newRecordingExecutor(nil)
+	engine := newTestEngine(store, executor)
+	compiled := mustCompile(t, WorkflowDefinition{ID: "input-pipeline", Concurrency: 1, Tasks: []TaskDefinition{{
+		Key: "read", Action: "read-document", Input: map[string]any{"path": "article.md"}, TimeoutMillis: 1000,
+	}}})
+	id, err := engine.CreateRun(context.Background(), compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Execute(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	input := executor.inputFor("read-document")
+	if input["path"] != "article.md" {
+		t.Fatalf("ExecutionRequest.Input = %#v, want article.md", input)
+	}
+	input["path"] = "changed.md"
+	if got := compiled.Definition().Tasks[0].Input["path"]; got != "article.md" {
+		t.Fatalf("executor mutated compiled input to %#v", got)
+	}
+}
+
 func TestEngineNeverExceedsConcurrencyLimit(t *testing.T) {
 	store := newMemoryStore()
 	executor := newGateExecutor()

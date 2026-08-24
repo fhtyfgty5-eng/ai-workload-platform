@@ -12,6 +12,10 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/agent"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/agent/catalog"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/agent/httpmodel"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/agent/mockmodel"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/pkg/workloadclient"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow/filestore"
@@ -35,6 +39,9 @@ func main() {
 
 // run 执行单次 CLI 调用并返回进程退出码，显式传入输入输出以便自动化测试。
 func run(ctx context.Context, args []string, dataDir string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "agent" {
+		return runAgent(ctx, args[1:], stdout, stderr, os.Getenv)
+	}
 	if len(args) > 0 && args[0] == "local" {
 		return runWithExecutorFactory(ctx, args[1:], dataDir, stdout, stderr, func(definition workflow.WorkflowDefinition) workflow.Executor {
 			return mockexec.New(workflow.RealClock{}, successScripts(definition))
@@ -47,6 +54,169 @@ func run(ctx context.Context, args []string, dataDir string, stdout, stderr io.W
 	return runWithExecutorFactory(ctx, args, dataDir, stdout, stderr, func(definition workflow.WorkflowDefinition) workflow.Executor {
 		return mockexec.New(workflow.RealClock{}, successScripts(definition))
 	})
+}
+
+const agentUsage = "usage: workload agent draft <goal> [--model mock|http] [--output <file>] | workload agent validate <draft.json> [--output <file>] | workload agent confirm <draft.json> --hash <hash> [--output <file>]"
+
+type agentOptions struct {
+	model  string
+	output string
+	hash   string
+}
+
+func runAgent(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, agentUsage)
+		return 2
+	}
+	command, input := args[0], args[1]
+	options, ok := parseAgentOptions(args[2:])
+	if !ok || (command != "draft" && options.model != "") || (command != "confirm" && options.hash != "") {
+		fmt.Fprintln(stderr, agentUsage)
+		return 2
+	}
+	if command == "confirm" && options.hash == "" {
+		fmt.Fprintln(stderr, "--hash is required")
+		return 2
+	}
+	service, err := newAgentService(options.model, getenv)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	switch command {
+	case "draft":
+		draft, err := service.GenerateDraft(ctx, input)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", agent.CodeOf(err), err)
+			return 1
+		}
+		return writeAgentJSON(stdout, stderr, options.output, draft)
+	case "validate":
+		draft, err := readDraft(input)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		validated, err := service.ValidateDraft(ctx, draft)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", agent.CodeOf(err), err)
+			return 1
+		}
+		exit := writeAgentJSON(stdout, stderr, options.output, validated)
+		if exit != 0 || len(validated.Validation.Errors) > 0 {
+			return 1
+		}
+		return 0
+	case "confirm":
+		draft, err := readDraft(input)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		definition, err := service.ConfirmDraft(ctx, draft, options.hash)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", agent.CodeOf(err), err)
+			return 1
+		}
+		return writeAgentJSON(stdout, stderr, options.output, definition)
+	default:
+		fmt.Fprintln(stderr, agentUsage)
+		return 2
+	}
+}
+
+func parseAgentOptions(args []string) (agentOptions, bool) {
+	options := agentOptions{}
+	if len(args)%2 != 0 {
+		return options, false
+	}
+	seen := map[string]bool{}
+	for index := 0; index < len(args); index += 2 {
+		flag, value := args[index], args[index+1]
+		if value == "" || seen[flag] {
+			return options, false
+		}
+		seen[flag] = true
+		switch flag {
+		case "--model":
+			if value != "mock" && value != "http" {
+				return options, false
+			}
+			options.model = value
+		case "--output":
+			options.output = value
+		case "--hash":
+			options.hash = value
+		default:
+			return options, false
+		}
+	}
+	return options, true
+}
+
+func newAgentService(modelName string, getenv func(string) string) (*agent.Service, error) {
+	directory, err := catalog.New(catalog.DefaultTemplates())
+	if err != nil {
+		return nil, err
+	}
+	registry, err := agent.NewToolRegistry(agent.RegisteredTool{Tool: catalog.NewTool(directory), RequiredPermission: "catalog:read"})
+	if err != nil {
+		return nil, err
+	}
+	var model agent.ModelAdapter = mockmodel.New()
+	if modelName == "http" {
+		model, err = httpmodel.New(httpmodel.Config{
+			Endpoint: getenv("WORKLOAD_MODEL_ENDPOINT"),
+			Model:    getenv("WORKLOAD_MODEL_NAME"),
+			APIKey:   getenv("WORKLOAD_MODEL_API_KEY"),
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return agent.NewService(model, registry, agent.NewDraftValidator(directory, []string{"document:read"}), agent.NewMemoryAuditSink(), agent.DefaultLimits(), []string{"catalog:read"})
+}
+
+func readDraft(path string) (agent.WorkflowDraft, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return agent.WorkflowDraft{}, err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	var draft agent.WorkflowDraft
+	if err := decoder.Decode(&draft); err != nil {
+		return agent.WorkflowDraft{}, fmt.Errorf("decode draft: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return agent.WorkflowDraft{}, fmt.Errorf("draft file must contain exactly one JSON value")
+	}
+	return draft, nil
+}
+
+func writeAgentJSON(stdout, stderr io.Writer, output string, value any) int {
+	if output == "" {
+		if err := json.NewEncoder(stdout).Encode(value); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	body, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	body = append(body, '\n')
+	if err := os.WriteFile(output, body, 0o600); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func runWithEnvironment(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) int {
@@ -236,6 +406,7 @@ func readDefinition(path string) (workflow.WorkflowDefinition, error) {
 
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
 	var definition workflow.WorkflowDefinition
 	if err := decoder.Decode(&definition); err != nil {
 		return workflow.WorkflowDefinition{}, fmt.Errorf("decode workflow: %w", err)

@@ -1,12 +1,17 @@
 package workflow
 
 import (
+	"bytes"
+	"encoding"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 )
 
 const maxWorkflowTasks = 10_000
+const maxTaskInputBytes = 64 * 1024
 
 var identifierPattern = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
@@ -32,6 +37,19 @@ func (c *CompiledWorkflow) Definition() WorkflowDefinition {
 
 // Compile 校验工作流定义，并在线性遍历中建立调度所需的索引和邻接表。
 func Compile(def WorkflowDefinition) (*CompiledWorkflow, error) {
+	// 先验证调用方提供的 Input，再执行深拷贝；这也能在复制前拒绝循环引用。
+	for _, task := range def.Tasks {
+		if err := validateJSONValue(task.Input, make(map[jsonVisit]bool)); err != nil {
+			return nil, fmt.Errorf("task %q input must contain only JSON values: %w", task.Key, err)
+		}
+		body, err := json.Marshal(task.Input)
+		if err != nil {
+			return nil, fmt.Errorf("task %q input must be a JSON object: %w", task.Key, err)
+		}
+		if len(body) > maxTaskInputBytes {
+			return nil, fmt.Errorf("task %q input cannot exceed %d bytes", task.Key, maxTaskInputBytes)
+		}
+	}
 	// 深拷贝隔离调用方后续修改，确保编译结果能在多个运行实例之间安全共享。
 	def = cloneDefinition(def)
 
@@ -130,6 +148,86 @@ func Compile(def WorkflowDefinition) (*CompiledWorkflow, error) {
 	}, nil
 }
 
+type jsonVisit struct {
+	kind reflect.Kind
+	ptr  uintptr
+}
+
+// validateJSONValue 限制公开 Go API 只能传入 JSON 数据模型，避免自定义编码逻辑绕过校验。
+func validateJSONValue(value any, visiting map[jsonVisit]bool) error {
+	if value == nil {
+		return nil
+	}
+	if _, ok := value.(json.Marshaler); ok {
+		return fmt.Errorf("custom JSON marshaler %T is not supported", value)
+	}
+	if _, ok := value.(encoding.TextMarshaler); ok {
+		return fmt.Errorf("custom text marshaler %T is not supported", value)
+	}
+
+	reflected := reflect.ValueOf(value)
+	for reflected.Kind() == reflect.Interface {
+		if reflected.IsNil() {
+			return nil
+		}
+		reflected = reflected.Elem()
+	}
+	switch reflected.Kind() {
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return nil
+	case reflect.Map:
+		if reflected.Type().Key().Kind() != reflect.String {
+			return fmt.Errorf("map key type %s is not a string", reflected.Type().Key())
+		}
+		return validateJSONCollection(reflected, visiting, func() error {
+			iterator := reflected.MapRange()
+			for iterator.Next() {
+				if err := validateJSONValue(iterator.Value().Interface(), visiting); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	case reflect.Slice:
+		if reflected.Type().Elem().Kind() == reflect.Uint8 {
+			return fmt.Errorf("byte slices are not JSON arrays")
+		}
+		return validateJSONCollection(reflected, visiting, func() error {
+			for index := 0; index < reflected.Len(); index++ {
+				if err := validateJSONValue(reflected.Index(index).Interface(), visiting); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	case reflect.Array:
+		for index := 0; index < reflected.Len(); index++ {
+			if err := validateJSONValue(reflected.Index(index).Interface(), visiting); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("type %T is not part of the JSON data model", value)
+	}
+}
+
+func validateJSONCollection(value reflect.Value, visiting map[jsonVisit]bool, validate func() error) error {
+	if value.IsNil() {
+		return nil
+	}
+	visit := jsonVisit{kind: value.Kind(), ptr: value.Pointer()}
+	if visiting[visit] {
+		return fmt.Errorf("cyclic JSON value")
+	}
+	visiting[visit] = true
+	defer delete(visiting, visit)
+	return validate()
+}
+
 // cloneDefinition 深拷贝可变切片，避免调用方修改原定义破坏编译结果的不变性。
 func cloneDefinition(def WorkflowDefinition) WorkflowDefinition {
 	clone := def
@@ -137,6 +235,26 @@ func cloneDefinition(def WorkflowDefinition) WorkflowDefinition {
 	copy(clone.Tasks, def.Tasks)
 	for i := range clone.Tasks {
 		clone.Tasks[i].DependsOn = append([]TaskKey(nil), def.Tasks[i].DependsOn...)
+		clone.Tasks[i].Input = cloneTaskInput(def.Tasks[i].Input)
 	}
 	return clone
+}
+
+// cloneTaskInput 通过 JSON 往返复制嵌套对象，避免调用方或 Executor 修改共享定义。
+// 调用前输入已经由 Compile 校验，因此编码或解码错误表示内部不变量被破坏。
+func cloneTaskInput(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		panic("clone validated task input: " + err.Error())
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var cloned map[string]any
+	if err := decoder.Decode(&cloned); err != nil {
+		panic("decode validated task input: " + err.Error())
+	}
+	return cloned
 }

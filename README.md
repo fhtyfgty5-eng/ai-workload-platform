@@ -2,7 +2,7 @@
 
 面向 Agent 与确定性程序任务的可靠运行时和调度平台。
 
-> 当前可运行范围：模块 2 已实现单实例 HTTP 控制面、PostgreSQL 持久化、版本化 Workflow、幂等 Run、Bearer Token、键集分页与 Run 过滤、OpenAPI 3.1、受监督的启动恢复、Go SDK 和控制面 CLI。多 Worker、真实 Agent Runtime 和任务容器执行仍属于后续模块。
+> 当前可运行范围：模块 3 已在可靠工作流内核和控制面之上实现单 Agent Runtime、Mock Model、可替换 HTTP 模型适配器、只读任务目录、自然语言 Workflow 草稿、结构化校验和人工确认 CLI。多 Worker、Agent 任务的生产执行环境、任务容器和 Web 控制台仍属于后续模块。
 
 ## 要解决的问题
 
@@ -49,6 +49,21 @@ Agent Runtime 是 Agent 的运行时环境，负责准备模型、工具、上�
 ## 快速开始
 
 环境要求：Go 1.26 或兼容版本；FileStore 的原子替换实现当前只支持 macOS 和 Linux。
+
+不启动服务器即可运行模块 3 的离线 Mock 演示：
+
+```bash
+mkdir -p .workload/agent-demo
+go run ./cmd/workload agent draft '先读取 article.md，再清洗内容，最后生成摘要' \
+  --model mock --output .workload/agent-demo/draft.json
+go run ./cmd/workload agent validate .workload/agent-demo/draft.json \
+  --output .workload/agent-demo/validated.json
+DRAFT_HASH="$(jq -r '.content_hash' .workload/agent-demo/validated.json)"
+go run ./cmd/workload agent confirm .workload/agent-demo/validated.json \
+  --hash "$DRAFT_HASH" --output .workload/agent-demo/workflow.json
+```
+
+`draft` 生成结构化建议，`validate` 检查任务目录、参数、权限、任务超时、Agent 并发与 DAG，`confirm` 验证草稿哈希后只输出最终 WorkflowDefinition，不会自动创建 Workflow 或启动 Run。CPU、内存和临时存储限制留到模块 6 的真实执行环境。完整演示和真实模型人工配置见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。
 
 运行全部自动化测试（真实 PostgreSQL 测试需要设置 `TEST_DATABASE_URL`）：
 
@@ -118,10 +133,14 @@ go run ./cmd/workload run status <上一步返回的run_id>
 - Workflow、Version、Run、Task 和 Event 列表使用不透明键集游标；Run 可按 `workflow_id`、`status` 组合过滤，游标只能在原资源和原过滤条件下继续使用。
 - 单个 WorkflowDefinition 最多包含 10,000 个任务；1,000 个 Run 是 Benchmark 输入规模，不是第 1,001 个 Run 的容量拒绝上限。
 - 当前没有真实命令执行、真实 Agent、完整日志指标平台、多 Worker、分布式调度或安全沙箱；Mock Executor 不执行本机命令。
+- 模块 3 的 Mock Model 只复现固定文档处理目标，不代表自然语言理解质量；HTTP 模型适配器必须人工配置并显式选择，默认测试和演示不会访问外部模型。
+- Agent 只能调用注册的只读目录工具；草稿校验和确认不能授权 Shell、任意文件、任意 URL 或数据库写入。
 
 首轮环境、输入、五轮原始数据和限制见[模块 1 性能基线](docs/实验/模块1性能基线.md)。这些数据不是生产性能承诺。
 
 模块 2 的单任务 HTTP/PostgreSQL 查询与 Run 创建五轮数据见[模块 2 控制面性能基线](docs/实验/模块2性能基线.md)。该基线使用本机回环请求，不代表生产尾延迟或饱和吞吐。
+
+模块 3 的 Mock 生成、目录查询、草稿校验和取消收敛五轮数据见[模块 3 验证与限制](docs/实验/模块3验证与限制.md)。该数据只衡量平台本地开销，不包含真实模型网络延迟。
 
 ## 项目路线
 
@@ -129,8 +148,8 @@ go run ./cmd/workload run status <上一步返回的run_id>
 
 0. 项目定义与文档基线，已完成；
 1. 单机可靠工作流内核，已完成；
-2. 控制面 API 与持久化存储，当前模块；
-3. Agent Runtime、模型与工具执行；
+2. 控制面 API 与持久化存储，已完成；
+3. Agent Runtime、模型与工具执行，当前模块；
 4. 多 Worker、租约、心跳与故障恢复；
 5. 可观测性、故障注入与性能验证；
 6. 受限执行环境与 Kubernetes；
@@ -150,6 +169,8 @@ go run ./cmd/workload run status <上一步返回的run_id>
 - [模块 1 学习文章](docs/学习/文章/模块1-单机可靠工作流内核设计与验证基础.md)：单机内核的数据结构、调度语义和验证方法。
 - [模块 2 学习文章](docs/学习/文章/模块2-从单机工作流内核到可靠控制面.md)：HTTP 控制面、PostgreSQL 事务、幂等、运行监督和崩溃恢复。
 - [模块 2 验证报告](docs/实验/模块2验证报告.md)：自动化结果、人工演示状态和当前证据边界。
+- [模块 3 学习文章](docs/学习/文章/模块3-Agent运行时模型工具与自然语言工作流.md)：Agent Runtime、模型适配、工具权限、草稿校验和人工确认。
+- [模块 3 验证与限制](docs/实验/模块3验证与限制.md)：自动化测试、CLI 演示、性能基线和真实模型边界。
 - [模块 1 性能基线](docs/实验/模块1性能基线.md)：10,000 任务、1,000 Run、恢复和 FileStore 的原始 Benchmark 数据。
 
 当前代码入口和限制见上方“快速开始”和“当前实现边界”。

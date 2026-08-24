@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -161,8 +162,14 @@ func (r *Repository) LoadDefinition(ctx context.Context, workflowID string, vers
 		return workflow.WorkflowDefinition{}, fmt.Errorf("load workflow definition: %w", err)
 	}
 	var definition workflow.WorkflowDefinition
-	if err := json.Unmarshal(body, &definition); err != nil {
+	if err := decodeJSONNumber(body, &definition); err != nil {
 		return workflow.WorkflowDefinition{}, fmt.Errorf("decode workflow definition: %w", err)
 	}
 	return definition, nil
+}
+
+func decodeJSONNumber(body []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	return decoder.Decode(target)
 }

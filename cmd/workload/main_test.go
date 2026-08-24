@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/agent"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow/filestore"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow/mockexec"
@@ -156,6 +157,171 @@ func TestControlPlaneCommandRequiresServerTokenAndIdempotencyKey(t *testing.T) {
 		return ""
 	}); exit != 2 {
 		t.Fatalf("missing key exit = %d, stderr=%q", exit, stderr.String())
+	}
+}
+
+func TestAgentDraftCommandWritesStructuredJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"agent", "draft", "先读取 article.md，再清洗内容，最后生成摘要", "--model", "mock"}, t.TempDir(), &stdout, &stderr)
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+	}
+	var draft map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &draft); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if draft["status"] != "generated" || draft["content_hash"] == "" {
+		t.Fatalf("draft = %#v, want generated with hash", draft)
+	}
+}
+
+func TestAgentValidateCommandReturnsNonzeroForInvalidDraft(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "draft.json")
+	if err := os.WriteFile(path, []byte(`{"draft_id":"bad","goal":"bad","definition":{"id":"bad","concurrency":1,"tasks":[{"key":"one","action":"unknown","timeout_ms":1}]},"status":"generated"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"agent", "validate", path}, t.TempDir(), &stdout, &stderr)
+	if exit == 0 || !strings.Contains(stdout.String(), "unknown_action") {
+		t.Fatalf("exit = %d stdout = %q stderr = %q", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestAgentConfirmCommandRequiresHash(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"agent", "confirm", "draft.json"}, t.TempDir(), &stdout, &stderr)
+	if exit != 2 || !strings.Contains(stderr.String(), "--hash") {
+		t.Fatalf("exit = %d stderr = %q, want hash usage error", exit, stderr.String())
+	}
+}
+
+func TestAgentConfirmCommandOutputsDefinitionWithoutStartingRun(t *testing.T) {
+	tempDir := t.TempDir()
+	draftPath := filepath.Join(tempDir, "draft.json")
+	validatedPath := filepath.Join(tempDir, "validated.json")
+	var stdout, stderr bytes.Buffer
+	if exit := run(context.Background(), []string{"agent", "draft", "先读取 article.md，再清洗内容，最后生成摘要", "--output", draftPath}, tempDir, &stdout, &stderr); exit != 0 {
+		t.Fatalf("draft exit = %d stderr = %q", exit, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exit := run(context.Background(), []string{"agent", "validate", draftPath, "--output", validatedPath}, tempDir, &stdout, &stderr); exit != 0 {
+		t.Fatalf("validate exit = %d stderr = %q", exit, stderr.String())
+	}
+	body, err := os.ReadFile(validatedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var draft struct {
+		ContentHash string `json:"content_hash"`
+	}
+	if err := json.Unmarshal(body, &draft); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exit := run(context.Background(), []string{"agent", "confirm", validatedPath, "--hash", draft.ContentHash}, tempDir, &stdout, &stderr); exit != 0 {
+		t.Fatalf("confirm exit = %d stderr = %q", exit, stderr.String())
+	}
+	var definition workflow.WorkflowDefinition
+	if err := json.Unmarshal(stdout.Bytes(), &definition); err != nil || definition.ID != "agent-document-pipeline" {
+		t.Fatalf("definition = %#v err = %v", definition, err)
+	}
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "draft.json" && entry.Name() != "validated.json" {
+			t.Fatalf("confirm unexpectedly created run data file %q", entry.Name())
+		}
+	}
+}
+
+func TestAgentCLIRevalidatesDraftAfterQuestionIsResolved(t *testing.T) {
+	tempDir := t.TempDir()
+	draftPath := filepath.Join(tempDir, "draft.json")
+	firstPath := filepath.Join(tempDir, "first-validation.json")
+	secondPath := filepath.Join(tempDir, "second-validation.json")
+	draft := agent.WorkflowDraft{
+		DraftID: "draft-review", Goal: "读取 article.md", Status: agent.DraftGenerated,
+		Definition: workflow.WorkflowDefinition{ID: "document-review", Concurrency: 1, Tasks: []workflow.TaskDefinition{{
+			Key: "read", Action: "read-document", Input: map[string]any{"source": "article.md"}, TimeoutMillis: 1000,
+		}}},
+		Questions: []agent.Question{{ID: "format", Text: "输出格式是什么？"}},
+	}
+	body, err := json.Marshal(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(draftPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if exit := run(context.Background(), []string{"agent", "validate", draftPath, "--output", firstPath}, tempDir, &stdout, &stderr); exit != 1 {
+		t.Fatalf("first validate exit = %d stderr = %q", exit, stderr.String())
+	}
+	validatedBody, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(validatedBody, &draft); err != nil {
+		t.Fatal(err)
+	}
+	draft.Questions[0].Answer = "markdown"
+	draft.Questions[0].Resolved = true
+	body, err = json.Marshal(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firstPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exit := run(context.Background(), []string{"agent", "validate", firstPath, "--output", secondPath}, tempDir, &stdout, &stderr); exit != 0 {
+		t.Fatalf("second validate exit = %d stderr = %q", exit, stderr.String())
+	}
+	validatedBody, err = os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(validatedBody, &draft); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exit := run(context.Background(), []string{"agent", "confirm", secondPath, "--hash", draft.ContentHash}, tempDir, &stdout, &stderr); exit != 0 {
+		t.Fatalf("confirm exit = %d stderr = %q", exit, stderr.String())
+	}
+}
+
+func TestReadDefinitionPreservesLargeTaskInputNumber(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.json")
+	body := []byte(`{"id":"large-number","concurrency":1,"tasks":[{"key":"one","action":"run","input":{"value":9007199254740993},"timeout_ms":1000}]}`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definition, err := readDefinition(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := definition.Tasks[0].Input["value"].(json.Number)
+	if !ok || value.String() != "9007199254740993" {
+		t.Fatalf("input value = %#v, want exact json.Number", definition.Tasks[0].Input["value"])
+	}
+}
+
+func TestAgentCommandsRejectUnknownFlagsAndTrailingArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"agent", "draft", "goal", "--unknown", "value"},
+		{"agent", "validate", "draft.json", "extra"},
+		{"agent", "confirm", "draft.json", "--hash", "hash", "extra"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if exit := run(context.Background(), args, t.TempDir(), &stdout, &stderr); exit != 2 {
+			t.Fatalf("run(%v) exit = %d stderr = %q, want 2", args, exit, stderr.String())
+		}
 	}
 }
 

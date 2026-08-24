@@ -33,6 +33,22 @@ func TestClientAddsBearerIdempotencyAndJSON(t *testing.T) {
 	}
 }
 
+func TestClientPreservesLargeTaskInputNumber(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"demo","concurrency":1,"tasks":[{"key":"one","action":"run","input":{"value":9007199254740993},"timeout_ms":1000}]}`))
+	}))
+	defer server.Close()
+	definition, err := New(server.URL, "viewer-secret").GetWorkflowVersion(context.Background(), "demo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := definition.Tasks[0].Input["value"].(json.Number)
+	if !ok || value.String() != "9007199254740993" {
+		t.Fatalf("input value = %#v, want exact json.Number", definition.Tasks[0].Input["value"])
+	}
+}
+
 func TestClientParsesAPIErrorAndDoesNotRetryWrite(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

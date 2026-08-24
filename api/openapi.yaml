@@ -395,6 +395,9 @@ components:
       properties:
         key: { type: string, pattern: '^[a-z0-9_-]{1,64}$' }
         action: { type: string, minLength: 1 }
+        input:
+          type: object
+          additionalProperties: true
         depends_on:
           type: array
           items: { type: string, pattern: '^[a-z0-9_-]{1,64}$' }

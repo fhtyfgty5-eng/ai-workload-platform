@@ -445,6 +445,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any, maxBytes int
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
 	if err := decoder.Decode(target); err != nil {
 		if !required && errors.Is(err, io.EOF) {
 			return nil
