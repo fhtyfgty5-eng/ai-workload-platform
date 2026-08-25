@@ -26,6 +26,10 @@ type Attempt struct {
 	Number int `json:"number"`
 	// Status 只描述本次尝试，不等同于所属 Task 的最终状态。
 	Status AttemptStatus `json:"status"`
+	// WorkerID 标识拥有本次 Attempt 的分布式 Worker；本地执行时为空。
+	WorkerID string `json:"worker_id,omitempty"`
+	// DispatchID 标识创建本次 Attempt 的持久化分发记录和租约。
+	DispatchID string `json:"dispatch_id,omitempty"`
 	// StartedAt 记录本次 Attempt 转为 running 的时间。
 	StartedAt time.Time `json:"started_at"`
 	// FinishedAt 仅在 Attempt 进入终态后设置。
@@ -103,7 +107,7 @@ type RunSnapshot struct {
 	Events []StateEvent `json:"events"`
 }
 
-// NewRunSnapshotForVersion builds an initial Run snapshot bound to one immutable workflow version.
+// NewRunSnapshotForVersion 创建绑定到一个不可变工作流版本的初始 Run 快照。
 // 控制面先构造该快照，再由 Repository 将 Run、TaskRun 和幂等记录放在同一事务中创建。
 func NewRunSnapshotForVersion(id RunID, compiled *CompiledWorkflow, version int, now time.Time) (RunSnapshot, error) {
 	if id == "" {

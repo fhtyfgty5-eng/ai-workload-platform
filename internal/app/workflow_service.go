@@ -12,7 +12,7 @@ import (
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
 
-// WorkflowService creates immutable, compiled workflow versions without HTTP concerns.
+// WorkflowService 创建经过编译的不可变工作流版本，不处理 HTTP 细节。
 type WorkflowService interface {
 	Create(context.Context, string, string, workflow.WorkflowDefinition) (DefinitionRef, error)
 	CreateVersion(context.Context, string, string, string, workflow.WorkflowDefinition) (DefinitionRef, error)
@@ -37,7 +37,7 @@ type workflowService struct {
 	cache      map[DefinitionRef]*workflow.CompiledWorkflow
 }
 
-// NewWorkflowService constructs the definition compiler and version cache.
+// NewWorkflowService 创建定义编译器和版本缓存。
 func NewWorkflowService(repository workflowRepository) WorkflowService {
 	return &workflowService{repository: repository, cache: make(map[DefinitionRef]*workflow.CompiledWorkflow)}
 }
@@ -178,6 +178,13 @@ func (s *workflowService) putCache(ref DefinitionRef, compiled *workflow.Compile
 }
 
 func definitionHash(definition workflow.WorkflowDefinition) string {
+	// executor 在模块 4 之前可以省略；默认 mock 不应让同一历史请求产生新的幂等哈希。
+	definition.Tasks = append([]workflow.TaskDefinition(nil), definition.Tasks...)
+	for index := range definition.Tasks {
+		if definition.Tasks[index].Executor == workflow.ExecutorMock {
+			definition.Tasks[index].Executor = ""
+		}
+	}
 	body, _ := json.Marshal(definition)
 	hash := sha256.Sum256(body)
 	return hex.EncodeToString(hash[:])

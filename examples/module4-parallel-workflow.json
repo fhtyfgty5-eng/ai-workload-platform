@@ -1,0 +1,42 @@
+{
+  "id": "module4-parallel-demo",
+  "concurrency": 4,
+  "tasks": [
+    {
+      "key": "extract-a",
+      "executor": "mock",
+      "action": "mock-extract-a",
+      "retry": {"max_attempts": 2, "interval_ms": 500},
+      "timeout_ms": 30000
+    },
+    {
+      "key": "extract-b",
+      "executor": "mock",
+      "action": "mock-extract-b",
+      "retry": {"max_attempts": 2, "interval_ms": 500},
+      "timeout_ms": 30000
+    },
+    {
+      "key": "extract-c",
+      "executor": "mock",
+      "action": "mock-extract-c",
+      "retry": {"max_attempts": 2, "interval_ms": 500},
+      "timeout_ms": 30000
+    },
+    {
+      "key": "extract-d",
+      "executor": "mock",
+      "action": "mock-extract-d",
+      "retry": {"max_attempts": 2, "interval_ms": 500},
+      "timeout_ms": 30000
+    },
+    {
+      "key": "merge",
+      "executor": "mock",
+      "action": "mock-merge",
+      "depends_on": ["extract-a", "extract-b", "extract-c", "extract-d"],
+      "retry": {"max_attempts": 2, "interval_ms": 500},
+      "timeout_ms": 30000
+    }
+  ]
+}

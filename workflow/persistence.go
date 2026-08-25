@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Persistence provides incremental commits, recovery queries, and durable cancellation requests.
+// Persistence 提供增量提交、恢复查询和持久化取消请求。
 // 模块 1 的 Store 通过内部适配器继续运行；模块 2 的 PostgreSQL Repository 直接实现该接口。
 type Persistence interface {
 	RunStore
@@ -23,7 +23,7 @@ type enginePersistence interface {
 	Apply(context.Context, ChangeSet) error
 }
 
-// IsWorkflowTerminalForStore reports whether a store can exclude a Run from startup recovery.
+// IsWorkflowTerminalForStore 判断存储层能否在启动恢复时排除该 Run。
 func IsWorkflowTerminalForStore(status WorkflowStatus) bool {
 	return isWorkflowTerminal(status)
 }

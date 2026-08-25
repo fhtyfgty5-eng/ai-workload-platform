@@ -113,12 +113,8 @@ func BenchmarkDependencyUnlock(b *testing.B) {
 	base.Run.StartedAt = &now
 	base.Run.Tasks[0].Status = TaskRunning
 	base.Run.Tasks[0].Attempts = []Attempt{{Number: 1, Status: AttemptRunning, StartedAt: now}}
-	completion := executionCompletion{
-		taskIndex: 0,
-		attempt:   1,
-		response:  ExecutionResponse{Kind: ResultSuccess},
-		finished:  now.Add(time.Second),
-	}
+	response := ExecutionResponse{Kind: ResultSuccess}
+	finishedAt := now.Add(time.Second)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -127,7 +123,7 @@ func BenchmarkDependencyUnlock(b *testing.B) {
 		b.StopTimer()
 		snapshot := cloneRunSnapshot(base)
 		b.StartTimer()
-		applied, err := applyCompletion(&snapshot, compiled, completion)
+		applied, err := ApplyAttemptResult(&snapshot, compiled, 0, 1, response, finishedAt)
 		b.StopTimer()
 		if err != nil {
 			b.Fatal(err)

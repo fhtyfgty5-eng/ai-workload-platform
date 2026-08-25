@@ -12,9 +12,10 @@ type openAPIDocument struct {
 	OpenAPI    string                          `yaml:"openapi"`
 	Paths      map[string]map[string]operation `yaml:"paths"`
 	Components struct {
-		Schemas    map[string]yaml.Node `yaml:"schemas"`
-		Responses  map[string]yaml.Node `yaml:"responses"`
-		Parameters map[string]yaml.Node `yaml:"parameters"`
+		Schemas         map[string]yaml.Node `yaml:"schemas"`
+		Responses       map[string]yaml.Node `yaml:"responses"`
+		Parameters      map[string]yaml.Node `yaml:"parameters"`
+		SecuritySchemes map[string]yaml.Node `yaml:"securitySchemes"`
 	} `yaml:"components"`
 }
 
@@ -26,28 +27,36 @@ type operation struct {
 }
 
 type operationExpectation struct {
-	Path    string
-	Method  string
-	Success string
-	Schema  string
+	Path     string
+	Method   string
+	Success  string
+	Schema   string
+	Security string
 }
 
 var implementedOperations = []operationExpectation{
 	{Path: "/health/live", Method: "get", Success: "200", Schema: "HealthResponse"},
 	{Path: "/health/ready", Method: "get", Success: "200", Schema: "HealthResponse"},
-	{Path: "/api/v1/workflows", Method: "get", Success: "200", Schema: "WorkflowPage"},
-	{Path: "/api/v1/workflows", Method: "post", Success: "201", Schema: "DefinitionRef"},
-	{Path: "/api/v1/workflows/{workflow-id}", Method: "get", Success: "200", Schema: "WorkflowSummary"},
-	{Path: "/api/v1/workflows/{workflow-id}/versions", Method: "get", Success: "200", Schema: "VersionPage"},
-	{Path: "/api/v1/workflows/{workflow-id}/versions", Method: "post", Success: "201", Schema: "DefinitionRef"},
-	{Path: "/api/v1/workflows/{workflow-id}/versions/{version}", Method: "get", Success: "200", Schema: "WorkflowDefinition"},
-	{Path: "/api/v1/workflows/{workflow-id}/versions/{version}/runs", Method: "post", Success: "202", Schema: "StartRunResponse"},
-	{Path: "/api/v1/runs", Method: "get", Success: "200", Schema: "RunPage"},
-	{Path: "/api/v1/runs/{run-id}", Method: "get", Success: "200", Schema: "RunSummary"},
-	{Path: "/api/v1/runs/{run-id}/tasks", Method: "get", Success: "200", Schema: "TaskPage"},
-	{Path: "/api/v1/runs/{run-id}/tasks/{task-key}", Method: "get", Success: "200", Schema: "TaskDetail"},
-	{Path: "/api/v1/runs/{run-id}/events", Method: "get", Success: "200", Schema: "EventPage"},
-	{Path: "/api/v1/runs/{run-id}/cancel", Method: "post", Success: "200", Schema: "CancelRunResponse"},
+	{Path: "/api/v1/workflows", Method: "get", Success: "200", Schema: "WorkflowPage", Security: "bearerAuth"},
+	{Path: "/api/v1/workflows", Method: "post", Success: "201", Schema: "DefinitionRef", Security: "bearerAuth"},
+	{Path: "/api/v1/workflows/{workflow-id}", Method: "get", Success: "200", Schema: "WorkflowSummary", Security: "bearerAuth"},
+	{Path: "/api/v1/workflows/{workflow-id}/versions", Method: "get", Success: "200", Schema: "VersionPage", Security: "bearerAuth"},
+	{Path: "/api/v1/workflows/{workflow-id}/versions", Method: "post", Success: "201", Schema: "DefinitionRef", Security: "bearerAuth"},
+	{Path: "/api/v1/workflows/{workflow-id}/versions/{version}", Method: "get", Success: "200", Schema: "WorkflowDefinition", Security: "bearerAuth"},
+	{Path: "/api/v1/workflows/{workflow-id}/versions/{version}/runs", Method: "post", Success: "202", Schema: "StartRunResponse", Security: "bearerAuth"},
+	{Path: "/api/v1/runs", Method: "get", Success: "200", Schema: "RunPage", Security: "bearerAuth"},
+	{Path: "/api/v1/runs/{run-id}", Method: "get", Success: "200", Schema: "RunSummary", Security: "bearerAuth"},
+	{Path: "/api/v1/runs/{run-id}/tasks", Method: "get", Success: "200", Schema: "TaskPage", Security: "bearerAuth"},
+	{Path: "/api/v1/runs/{run-id}/tasks/{task-key}", Method: "get", Success: "200", Schema: "TaskDetail", Security: "bearerAuth"},
+	{Path: "/api/v1/runs/{run-id}/events", Method: "get", Success: "200", Schema: "EventPage", Security: "bearerAuth"},
+	{Path: "/api/v1/runs/{run-id}/cancel", Method: "post", Success: "200", Schema: "CancelRunResponse", Security: "bearerAuth"},
+	{Path: "/api/v1/workers/register", Method: "post", Success: "201", Schema: "RegisterWorkerResponse", Security: "workerBootstrapAuth"},
+	{Path: "/api/v1/workers/{worker-id}/claims", Method: "post", Success: "200", Schema: "ClaimResponse", Security: "workerSessionAuth"},
+	{Path: "/api/v1/workers/{worker-id}/heartbeat", Method: "post", Success: "200", Schema: "HeartbeatResponse", Security: "workerSessionAuth"},
+	{Path: "/api/v1/workers/{worker-id}/leases/{dispatch-id}/complete", Method: "post", Success: "200", Schema: "CompleteResponse", Security: "workerSessionAuth"},
+	{Path: "/api/v1/workers/{worker-id}/drain", Method: "post", Success: "200", Schema: "WorkerSummary", Security: "workerSessionAuth"},
+	{Path: "/api/v1/workers", Method: "get", Success: "200", Schema: "WorkerPage", Security: "bearerAuth"},
+	{Path: "/api/v1/workers/{worker-id}", Method: "get", Success: "200", Schema: "WorkerSummary", Security: "bearerAuth"},
 }
 
 func TestOpenAPI31DocumentsEveryImplementedOperationAndSuccessSchema(t *testing.T) {
@@ -89,9 +98,12 @@ func TestOpenAPIOperationsHaveSecurityErrorsParametersAndResolvableRefs(t *testi
 	document, root := loadOpenAPI(t)
 	for _, expected := range implementedOperations {
 		operation := document.Paths[expected.Path][expected.Method]
-		if strings.HasPrefix(expected.Path, "/api/") {
-			if !hasBearerSecurity(operation.Security) {
-				t.Errorf("%s %s missing bearerAuth", expected.Method, expected.Path)
+		if expected.Security != "" {
+			if !hasSecurity(operation.Security, expected.Security) {
+				t.Errorf("%s %s missing %s", expected.Method, expected.Path, expected.Security)
+			}
+			if _, ok := document.Components.SecuritySchemes[expected.Security]; !ok {
+				t.Errorf("%s %s references missing security scheme %s", expected.Method, expected.Path, expected.Security)
 			}
 			for _, status := range []string{"401", "500", "503"} {
 				if responseSchemaRef(t, document, operation.Responses[status]) != "#/components/schemas/ErrorEnvelope" {
@@ -133,6 +145,30 @@ func TestOpenAPITaskDefinitionDocumentsStructuredInput(t *testing.T) {
 	input := mappingValue(mappingValue(task, "properties"), "input")
 	if scalar(mappingValue(input, "type")) != "object" || scalar(mappingValue(input, "additionalProperties")) != "true" {
 		t.Fatalf("TaskDefinition.input schema = %v, want object with arbitrary JSON properties", input)
+	}
+}
+
+func TestOpenAPIStatusEnumsMatchImplementedProtocols(t *testing.T) {
+	document, _ := loadOpenAPI(t)
+	taskStatuses := sequenceValues(mappingValue(document.Components.Schemas["TaskStatus"], "enum"))
+	if _, ok := taskStatuses["queued"]; !ok {
+		t.Errorf("TaskStatus enum = %v, missing queued", taskStatuses)
+	}
+
+	completeRequest := document.Components.Schemas["CompleteRequest"]
+	result := mappingValue(mappingValue(completeRequest, "properties"), "result")
+	kind := mappingValue(mappingValue(result, "properties"), "kind")
+	resultKinds := sequenceValues(mappingValue(kind, "enum"))
+	wantKinds := map[string]struct{}{
+		"success": {}, "temporary_failure": {}, "permanent_failure": {},
+	}
+	if len(resultKinds) != len(wantKinds) {
+		t.Fatalf("CompleteRequest result kinds = %v, want %v", resultKinds, wantKinds)
+	}
+	for want := range wantKinds {
+		if _, ok := resultKinds[want]; !ok {
+			t.Fatalf("CompleteRequest result kinds = %v, missing %q", resultKinds, want)
+		}
 	}
 }
 
@@ -198,9 +234,9 @@ func operationParameterNames(t *testing.T, document openAPIDocument, operation o
 	return names
 }
 
-func hasBearerSecurity(security []map[string][]string) bool {
+func hasSecurity(security []map[string][]string, scheme string) bool {
 	for _, requirement := range security {
-		if _, ok := requirement["bearerAuth"]; ok {
+		if _, ok := requirement[scheme]; ok {
 			return true
 		}
 	}
@@ -227,6 +263,17 @@ func scalar(node yaml.Node) string {
 		return ""
 	}
 	return node.Value
+}
+
+func sequenceValues(node yaml.Node) map[string]struct{} {
+	values := make(map[string]struct{})
+	if node.Kind != yaml.SequenceNode {
+		return values
+	}
+	for _, item := range node.Content {
+		values[item.Value] = struct{}{}
+	}
+	return values
 }
 
 func collectLocalRefs(node *yaml.Node, refs map[string]struct{}) {

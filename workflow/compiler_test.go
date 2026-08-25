@@ -97,6 +97,32 @@ func TestLegacyTaskDefinitionWithoutInputRemainsValid(t *testing.T) {
 	}
 }
 
+func TestCompileNormalizesDefaultExecutorWithoutMutatingInput(t *testing.T) {
+	definition := WorkflowDefinition{ID: "default-executor", Concurrency: 1, Tasks: []TaskDefinition{{
+		Key: "task", Action: "run", TimeoutMillis: 1000,
+	}}}
+	compiled, err := Compile(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := compiled.Definition().Tasks[0].Executor; got != ExecutorMock {
+		t.Fatalf("compiled Executor = %q, want %q", got, ExecutorMock)
+	}
+	if definition.Tasks[0].Executor != "" {
+		t.Fatalf("input Executor = %q, want unchanged empty value", definition.Tasks[0].Executor)
+	}
+}
+
+func TestCompileRejectsUnsupportedExecutor(t *testing.T) {
+	definition := WorkflowDefinition{ID: "unsupported-executor", Concurrency: 1, Tasks: []TaskDefinition{{
+		Key: "task", Executor: "shell", Action: "run", TimeoutMillis: 1000,
+	}}}
+	_, err := Compile(definition)
+	if err == nil || !strings.Contains(err.Error(), "executor") {
+		t.Fatalf("Compile() error = %v, want unsupported executor error", err)
+	}
+}
+
 func TestCompileBuildsIndexAndDependencies(t *testing.T) {
 	def := WorkflowDefinition{
 		ID:          "document-pipeline",

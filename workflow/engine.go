@@ -283,7 +283,7 @@ func (e *Engine) executeSnapshot(
 					return e.stoppedRunResult(ctx, runCtx, snapshot)
 				}
 				updated := cloneRunSnapshot(snapshot)
-				applied, err := applyCompletion(&updated, compiled, completion)
+				applied, err := ApplyAttemptResult(&updated, compiled, completion.taskIndex, completion.attempt, completion.response, completion.finished)
 				if err != nil {
 					return WorkflowRun{}, err
 				}
@@ -311,7 +311,7 @@ func (e *Engine) executeSnapshot(
 				}
 				running--
 				updated := cloneRunSnapshot(snapshot)
-				applied, err := applyTimeout(&updated, compiled, timeout)
+				applied, err := TimeoutAttempt(&updated, compiled, timeout.taskIndex, timeout.attempt, timeout.at)
 				if err != nil {
 					return WorkflowRun{}, err
 				}
@@ -333,7 +333,7 @@ func (e *Engine) executeSnapshot(
 				}
 				// 计时器只报告“可以重试”；事件循环仍需复核 Attempt 编号和 ReadyAt。
 				updated := cloneRunSnapshot(snapshot)
-				applied, err := applyRetryReady(&updated, retry)
+				applied, err := MakeRetryReady(&updated, retry.taskIndex, retry.attempt, retry.at)
 				if err != nil {
 					return WorkflowRun{}, err
 				}
@@ -370,7 +370,7 @@ func (e *Engine) executeSnapshot(
 			}
 		}
 		updated := cloneRunSnapshot(snapshot)
-		applied, err := applyRetryReady(&updated, retry)
+		applied, err := MakeRetryReady(&updated, retry.taskIndex, retry.attempt, retry.at)
 		if err != nil {
 			return WorkflowRun{}, err
 		}
@@ -392,6 +392,11 @@ func (e *Engine) executeSnapshot(
 	}
 
 	// 所有活动 Attempt 和等待重试都已收敛后，才计算并持久化 Workflow 终态。
+	// 共享结果函数会在最后一个 Task 结算时一并持久化 Run 终态，避免分布式路径缺少终结步骤。
+	if isWorkflowTerminal(snapshot.Run.Status) {
+		e.forgetCompiled(snapshot.Run.ID)
+		return snapshot.Run, nil
+	}
 	finalStatus := WorkflowSucceeded
 	reason := "all tasks succeeded"
 	if hasFailedTask(snapshot.Run.Tasks) {
@@ -453,7 +458,7 @@ func (e *Engine) Cancel(ctx context.Context, id RunID) error {
 		e.mu.Unlock()
 		return nil
 	}
-	updated, err := cancellationSnapshot(snapshot, e.clock.Now())
+	updated, err := CancelRunSnapshot(snapshot, e.clock.Now())
 	if err == nil {
 		err = e.saveSnapshot(ctx, snapshot, &updated)
 	}
@@ -612,129 +617,6 @@ func (e *Engine) scheduleRetry(ctx context.Context, taskIndex int, task TaskRun,
 	}()
 }
 
-// applyCompletion 只接受当前 running Attempt 的首次完成消息，防止重复结果重复解锁下游。
-func applyCompletion(snapshot *RunSnapshot, compiled *CompiledWorkflow, completion executionCompletion) (bool, error) {
-	if completion.taskIndex < 0 || completion.taskIndex >= len(snapshot.Run.Tasks) {
-		return false, fmt.Errorf("invalid completion task index %d", completion.taskIndex)
-	}
-	task := &snapshot.Run.Tasks[completion.taskIndex]
-	if task.Status != TaskRunning || len(task.Attempts) == 0 {
-		return false, nil
-	}
-	attempt := &task.Attempts[len(task.Attempts)-1]
-	if attempt.Number != completion.attempt || attempt.Status != AttemptRunning {
-		return false, nil
-	}
-	// ResultKind 是 Engine 与 Executor 的封闭协议；未知值属于系统错误，不能猜测业务终态。
-	if completion.response.Kind != ResultSuccess &&
-		completion.response.Kind != ResultTemporaryFailure &&
-		completion.response.Kind != ResultPermanentFailure {
-		return false, fmt.Errorf("unsupported execution result %q", completion.response.Kind)
-	}
-	attempt.Result = ExecutionResult{
-		Output:       completion.response.Output,
-		ErrorCode:    completion.response.ErrorCode,
-		ErrorMessage: completion.response.ErrorMessage,
-	}
-	// 临时失败与永久失败都结束当前 Attempt，但只有临时失败进入统一重试决策。
-	if completion.response.Kind == ResultTemporaryFailure {
-		if err := transitionAttempt(snapshot, task.Key, attempt, AttemptFailed, completion.finished, "temporary execution failure"); err != nil {
-			return false, err
-		}
-		return applyRetryDecision(snapshot, compiled, completion.taskIndex, attempt, completion.finished, "temporary execution failure")
-	}
-	if completion.response.Kind == ResultPermanentFailure {
-		if err := transitionAttempt(snapshot, task.Key, attempt, AttemptFailed, completion.finished, "permanent execution failure"); err != nil {
-			return false, err
-		}
-		if err := transitionTask(snapshot, completion.taskIndex, TaskFailed, completion.finished, "permanent execution failure"); err != nil {
-			return false, err
-		}
-		if err := skipDescendants(snapshot, compiled, completion.taskIndex, completion.finished); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	if err := transitionAttempt(snapshot, task.Key, attempt, AttemptSucceeded, completion.finished, "execution succeeded"); err != nil {
-		return false, err
-	}
-	if err := transitionTask(snapshot, completion.taskIndex, TaskSucceeded, completion.finished, "execution succeeded"); err != nil {
-		return false, err
-	}
-	// 成功只解锁直接下游；每条依赖边恰好使对应计数减一，降到零时任务才 ready。
-	for _, successorIndex := range compiled.successors[completion.taskIndex] {
-		snapshot.Run.RemainingDependencies[successorIndex]--
-		if snapshot.Run.RemainingDependencies[successorIndex] < 0 {
-			return false, fmt.Errorf("task %q dependency count became negative", snapshot.Run.Tasks[successorIndex].Key)
-		}
-		if snapshot.Run.RemainingDependencies[successorIndex] == 0 {
-			if err := transitionTask(snapshot, successorIndex, TaskReady, completion.finished, "dependencies succeeded"); err != nil {
-				return false, err
-			}
-		}
-	}
-	return true, nil
-}
-
-// applyTimeout 只结算仍处于 running 的同编号 Attempt，并复用临时失败的重试策略。
-func applyTimeout(snapshot *RunSnapshot, compiled *CompiledWorkflow, timeout executionTimeout) (bool, error) {
-	if timeout.taskIndex < 0 || timeout.taskIndex >= len(snapshot.Run.Tasks) {
-		return false, fmt.Errorf("invalid timeout task index %d", timeout.taskIndex)
-	}
-	task := &snapshot.Run.Tasks[timeout.taskIndex]
-	if task.Status != TaskRunning || len(task.Attempts) == 0 {
-		return false, nil
-	}
-	attempt := &task.Attempts[len(task.Attempts)-1]
-	if attempt.Number != timeout.attempt || attempt.Status != AttemptRunning {
-		return false, nil
-	}
-	attempt.Result = ExecutionResult{ErrorCode: "timeout", ErrorMessage: "execution timed out"}
-	if err := transitionAttempt(snapshot, task.Key, attempt, AttemptTimedOut, timeout.at, "execution timed out"); err != nil {
-		return false, err
-	}
-	return applyRetryDecision(snapshot, compiled, timeout.taskIndex, attempt, timeout.at, "execution timed out")
-}
-
-// applyRetryDecision 在剩余次数与最终失败之间二选一；调用方负责保存副本后再启动计时器。
-func applyRetryDecision(snapshot *RunSnapshot, compiled *CompiledWorkflow, taskIndex int, attempt *Attempt, at time.Time, reason string) (bool, error) {
-	task := &snapshot.Run.Tasks[taskIndex]
-	definition := compiled.definition.Tasks[taskIndex]
-	if attempt.Number < definition.Retry.MaxAttempts {
-		if err := transitionTask(snapshot, taskIndex, TaskWaitingRetry, at, reason); err != nil {
-			return false, err
-		}
-		readyAt := at.Add(time.Duration(definition.Retry.IntervalMillis) * time.Millisecond)
-		task.ReadyAt = &readyAt
-		return true, nil
-	}
-	if err := transitionTask(snapshot, taskIndex, TaskFailed, at, "retry attempts exhausted"); err != nil {
-		return false, err
-	}
-	if err := skipDescendants(snapshot, compiled, taskIndex, at); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// applyRetryReady 忽略过期或提前到达的计时器事件，只把当前 waiting_retry 任务转回 ready。
-func applyRetryReady(snapshot *RunSnapshot, retry retryReady) (bool, error) {
-	if retry.taskIndex < 0 || retry.taskIndex >= len(snapshot.Run.Tasks) {
-		return false, fmt.Errorf("invalid retry task index %d", retry.taskIndex)
-	}
-	task := &snapshot.Run.Tasks[retry.taskIndex]
-	if task.Status != TaskWaitingRetry || task.ReadyAt == nil || len(task.Attempts) == 0 {
-		return false, nil
-	}
-	if task.Attempts[len(task.Attempts)-1].Number != retry.attempt || retry.at.Before(*task.ReadyAt) {
-		return false, nil
-	}
-	if err := transitionTask(snapshot, retry.taskIndex, TaskReady, retry.at, "retry interval elapsed"); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 func hasWaitingRetry(tasks []TaskRun) bool {
 	for _, task := range tasks {
 		if task.Status == TaskWaitingRetry {
@@ -753,7 +635,7 @@ func (e *Engine) finalizeCancellation(ctx context.Context, snapshot RunSnapshot)
 			e.forgetCompiled(snapshot.Run.ID)
 			return snapshot.Run, nil
 		}
-		updated, err := cancellationSnapshot(snapshot, at)
+		updated, err := CancelRunSnapshot(snapshot, at)
 		if err != nil {
 			return WorkflowRun{}, err
 		}
@@ -788,62 +670,6 @@ func (e *Engine) reconcilePersistedCancellation(ctx context.Context, id RunID, s
 		return WorkflowRun{}, saveErr
 	}
 	return e.finalizeCancellation(ctx, snapshot)
-}
-
-// cancellationSnapshot 使用同一时间点把所有未终止任务和 Workflow 收敛为取消状态。
-func cancellationSnapshot(snapshot RunSnapshot, at time.Time) (RunSnapshot, error) {
-	updated := cloneRunSnapshot(snapshot)
-	for taskIndex := range updated.Run.Tasks {
-		task := &updated.Run.Tasks[taskIndex]
-		if isTaskTerminal(task.Status) {
-			continue
-		}
-		if task.Status == TaskRunning && len(task.Attempts) > 0 {
-			attempt := &task.Attempts[len(task.Attempts)-1]
-			if attempt.Status == AttemptRunning {
-				attempt.Result = ExecutionResult{ErrorCode: "canceled", ErrorMessage: "execution canceled"}
-				if err := transitionAttempt(&updated, task.Key, attempt, AttemptCanceled, at, "workflow canceled"); err != nil {
-					return RunSnapshot{}, err
-				}
-			}
-		}
-		if err := transitionTask(&updated, taskIndex, TaskCanceled, at, "workflow canceled"); err != nil {
-			return RunSnapshot{}, err
-		}
-	}
-	if err := transitionWorkflow(&updated, WorkflowCanceled, at, "cancellation requested"); err != nil {
-		return RunSnapshot{}, err
-	}
-	return updated, nil
-}
-
-// skipDescendants 沿 DAG 向下传播失败，只跳过尚未进入终态的后代。
-func skipDescendants(snapshot *RunSnapshot, compiled *CompiledWorkflow, failedTask int, at time.Time) error {
-	return skipDescendantsFrom(snapshot, compiled, []int{failedTask}, at)
-}
-
-// skipDescendantsFrom 从多个失败源一次遍历全部后代，恢复大量终态任务时仍保持 O(V + E)。
-func skipDescendantsFrom(snapshot *RunSnapshot, compiled *CompiledWorkflow, failedTasks []int, at time.Time) error {
-	queue := make([]int, 0)
-	for _, failedTask := range failedTasks {
-		queue = append(queue, compiled.successors[failedTask]...)
-	}
-	visited := make([]bool, len(snapshot.Run.Tasks))
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-		if visited[current] {
-			continue
-		}
-		visited[current] = true
-		if !isTaskTerminal(snapshot.Run.Tasks[current].Status) {
-			if err := transitionTask(snapshot, current, TaskSkipped, at, "upstream task failed"); err != nil {
-				return err
-			}
-		}
-		queue = append(queue, compiled.successors[current]...)
-	}
-	return nil
 }
 
 func isTaskTerminal(status TaskStatus) bool {

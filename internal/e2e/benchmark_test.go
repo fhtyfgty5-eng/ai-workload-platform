@@ -86,7 +86,6 @@ func newBenchmarkControlPlane(b *testing.B) (*httptest.Server, app.RunService, s
 		repository,
 		definitions,
 		benchmarkEngine{},
-		func(workflow.RunID) {},
 		func() (workflow.RunID, error) { return workflow.RunID(fmt.Sprintf("%032x", runSequence.Add(1))), nil },
 	)
 	if err != nil {
@@ -131,5 +130,7 @@ func benchmarkRequest(b *testing.B, url, method, token, key string, body []byte)
 }
 
 type benchmarkEngine struct{}
+
+func (benchmarkEngine) Wake() {}
 
 func (benchmarkEngine) Cancel(context.Context, workflow.RunID) error { return nil }

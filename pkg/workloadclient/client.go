@@ -1,4 +1,4 @@
-// Package workloadclient is the public Go client for the versioned control plane.
+// Package workloadclient 提供访问版本化控制面的公开 Go 客户端。
 package workloadclient
 
 import (

@@ -2,7 +2,7 @@
 
 面向 Agent 与确定性程序任务的可靠运行时和调度平台。
 
-> 当前可运行范围：模块 3 已在可靠工作流内核和控制面之上实现单 Agent Runtime、Mock Model、可替换 HTTP 模型适配器、只读任务目录、自然语言 Workflow 草稿、结构化校验和人工确认 CLI。多 Worker、Agent 任务的生产执行环境、任务容器和 Web 控制台仍属于后续模块。
+> 当前可运行范围：模块 4 已实现独立 Worker 进程、PostgreSQL 持久化 Dispatch、HTTP 领取、租约、心跳、结果幂等、迟到结果拒绝、故障回收、背压和跨轮基础公平性。Worker 当前只执行安全 Mock Action；真实 Agent 任务执行环境、任务容器、完整可观测性和 Web 控制台仍属于后续模块。
 
 ## 要解决的问题
 
@@ -71,7 +71,7 @@ go run ./cmd/workload agent confirm .workload/agent-demo/validated.json \
 go test ./...
 ```
 
-启动模块 2 本地控制面：
+启动 PostgreSQL、执行迁移并运行控制面：
 
 ```bash
 docker compose up -d postgres
@@ -79,9 +79,23 @@ export DATABASE_URL='postgres://workload:workload_dev_only@localhost:5432/worklo
 export WORKLOAD_HTTP_ADDR='127.0.0.1:8080'
 export WORKLOAD_VIEWER_TOKEN='replace-with-viewer-token'
 export WORKLOAD_OPERATOR_TOKEN='replace-with-a-different-operator-token'
+export WORKLOAD_WORKER_BOOTSTRAP_TOKEN='replace-with-a-third-worker-token'
 go run ./cmd/workload-server migrate up
 go run ./cmd/workload-server
 ```
+
+控制面启动后，在两个新终端中加载相同的本机配置，并为每个进程设置不同名称：
+
+```bash
+set -a
+source .env.local
+set +a
+export WORKLOAD_SERVER_URL='http://127.0.0.1:8080'
+export WORKLOAD_WORKER_NAME='worker-a'
+go run ./cmd/workload-worker
+```
+
+第二个 Worker 使用 `WORKLOAD_WORKER_NAME='worker-b'`。Worker 会自行注册、按空闲槽位领取、心跳续租并提交 Mock 结果。完整多 Worker 正常与故障演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。
 
 Docker 登录不是本地公开 PostgreSQL 镜像的前置条件。新电脑环境准备、完整运行步骤和当前推荐演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。该手册会随后续模块持续更新，README 只保留当前版本的最短启动入口。
 
@@ -121,7 +135,7 @@ go run ./cmd/workload run start document-pipeline --version 1 --idempotency-key 
 go run ./cmd/workload run status <上一步返回的run_id>
 ```
 
-控制面默认使用确定成功的安全 Mock Executor，只返回模拟结果，不解释或执行 `Action`。
+网络控制面不会在自身进程执行任务；至少一个 `workload-worker` 必须在线，Run 才能从 `ready` 进入分发和执行。Worker 只返回安全 Mock 结果，不解释或执行 `Action`。
 
 ## 当前实现边界
 
@@ -129,10 +143,14 @@ go run ./cmd/workload run status <上一步返回的run_id>
 - FileStore 使用“每个 Run 一个完整 JSON 快照”，适合模块 1 的单机验证，不支持多进程并发写入或复杂查询。
 - 原子替换依赖同目录临时文件和 `os.Rename`，当前明确支持 macOS 和 Linux，不对其他平台作相同保证。
 - 恢复语义是“至少执行一次”：崩溃发生在外部动作成功但成功状态保存之前时，任务可能再次执行。未来真实 Executor 必须使用幂等操作、唯一请求 ID 或结果去重控制重复副作用。
-- 数据库连接或 Advisory Lock 运行期失效时，原控制面会变为不可就绪、中断本机执行并以错误退出，不在同一进程自动重新加锁。新进程启动后从 PostgreSQL 已提交状态恢复；这种基础设施中断不会被写成用户取消。
+- 数据库连接或 Advisory Lock 运行期失效时，控制面会变为不可就绪并以错误退出，不在同一进程自动重新加锁。Worker 在无法续租时会在本地安全期限停止执行；新控制面进程启动后从 PostgreSQL 已提交状态恢复，这种基础设施中断不会被写成用户取消。
 - Workflow、Version、Run、Task 和 Event 列表使用不透明键集游标；Run 可按 `workflow_id`、`status` 组合过滤，游标只能在原资源和原过滤条件下继续使用。
 - 单个 WorkflowDefinition 最多包含 10,000 个任务；1,000 个 Run 是 Benchmark 输入规模，不是第 1,001 个 Run 的容量拒绝上限。
-- 当前没有真实命令执行、真实 Agent、完整日志指标平台、多 Worker、分布式调度或安全沙箱；Mock Executor 不执行本机命令。
+- 当前已有多 Worker 分布式 Mock 执行，但没有真实命令执行、真实 Agent 任务执行、完整日志指标平台或安全沙箱；Mock Executor 不执行本机命令。
+- Worker 使用配置式引导 Token 注册，再使用会话 Token 调用领取、心跳、完成和 drain API；数据库只保存令牌摘要，查询 API 不返回凭据。
+- 租约和隔离令牌能拒绝旧结果，但不能撤销已经发生的外部副作用；分布式路径仍是至少执行一次。
+- 当前只有一个 Dispatch Coordinator；PostgreSQL Advisory Lock 会拒绝第二个协调者，不提供自动高可用切换。
+- 单个 Run 的状态变化共享一条 revision，保证事件顺序和旧快照拒绝，但会串行化该 Run 的数据库提交；模块 4 基准不显示随 Worker 数线性扩展。
 - 模块 3 的 Mock Model 只复现固定文档处理目标，不代表自然语言理解质量；HTTP 模型适配器必须人工配置并显式选择，默认测试和演示不会访问外部模型。
 - Agent 只能调用注册的只读目录工具；草稿校验和确认不能授权 Shell、任意文件、任意 URL 或数据库写入。
 
@@ -142,6 +160,8 @@ go run ./cmd/workload run status <上一步返回的run_id>
 
 模块 3 的 Mock 生成、目录查询、草稿校验和取消收敛五轮数据见[模块 3 验证与限制](docs/实验/模块3验证与限制.md)。该数据只衡量平台本地开销，不包含真实模型网络延迟。
 
+模块 4 的多 Worker、进程崩溃、迟到结果、控制面重启和 1,000 任务基准见[模块 4 验证报告](docs/实验/模块4验证报告.md)。该数据描述单机 PostgreSQL 和单 Run 的当前实现，不代表生产容量。
+
 ## 项目路线
 
 项目共分为模块 0 至模块 7：
@@ -150,7 +170,7 @@ go run ./cmd/workload run status <上一步返回的run_id>
 1. 单机可靠工作流内核，已完成；
 2. 控制面 API 与持久化存储，已完成；
 3. Agent Runtime、模型与工具执行，已完成；
-4. 多 Worker、租约、心跳与故障恢复，当前处于需求与设计阶段；
+4. 多 Worker、租约、心跳与故障恢复，当前实现和自动化验证已完成，等待模块级人工审核；
 5. 可观测性、故障注入与性能验证；
 6. 受限执行环境与 Kubernetes；
 7. 真实场景、最小控制台与开源发布。
@@ -172,7 +192,8 @@ go run ./cmd/workload run status <上一步返回的run_id>
 - [模块 3 学习文章](docs/学习/文章/模块3-Agent运行时模型工具与自然语言工作流.md)：Agent Runtime、模型适配、工具权限、草稿校验和人工确认。
 - [模块 3 验证与限制](docs/实验/模块3验证与限制.md)：自动化测试、CLI 演示、性能基线和真实模型边界。
 - [模块 4 需求与设计](docs/计划/模块4需求与设计.md)：为什么从单进程进入多 Worker，以及租约、心跳、迟到结果和重复执行边界。
-- [模块 4 详细实施计划](docs/计划/模块4详细实施计划.md)：文件结构、核心接口、TDD 顺序、故障实验和模块级验收门槛。
+- [模块 4 学习文章](docs/学习/文章/模块4-多Worker租约心跳与故障恢复.md)：Worker、Dispatch、租约、心跳、隔离令牌、事务与故障恢复。
+- [模块 4 验证报告](docs/实验/模块4验证报告.md)：真实 PostgreSQL、多进程故障测试、性能数据和限制。
 - [模块 1 性能基线](docs/实验/模块1性能基线.md)：10,000 任务、1,000 Run、恢复和 FileStore 的原始 Benchmark 数据。
 
 当前代码入口和限制见上方“快速开始”和“当前实现边界”。

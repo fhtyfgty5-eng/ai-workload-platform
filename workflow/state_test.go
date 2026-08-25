@@ -222,3 +222,32 @@ func TestTaskTransitionsAcceptLifecycleStates(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskQueuedTransitionsAreLimitedToDistributedLifecycle(t *testing.T) {
+	at := time.Unix(7, 0)
+	snapshot := RunSnapshot{Run: WorkflowRun{Tasks: []TaskRun{{Key: "task", Status: TaskReady}}}}
+	if err := transitionTask(&snapshot, 0, TaskQueued, at, "dispatch created"); err != nil {
+		t.Fatalf("ready -> queued: %v", err)
+	}
+	if err := transitionTask(&snapshot, 0, TaskRunning, at, "lease claimed"); err != nil {
+		t.Fatalf("queued -> running: %v", err)
+	}
+
+	for _, test := range []struct {
+		from TaskStatus
+		to   TaskStatus
+	}{
+		{from: TaskWaitingDependencies, to: TaskQueued},
+		{from: TaskQueued, to: TaskSucceeded},
+	} {
+		snapshot := RunSnapshot{Run: WorkflowRun{Tasks: []TaskRun{{Key: "task", Status: test.from}}}}
+		if err := transitionTask(&snapshot, 0, test.to, at, "illegal"); err == nil {
+			t.Fatalf("%s -> %s error = nil, want illegal transition", test.from, test.to)
+		}
+	}
+
+	snapshot = RunSnapshot{Run: WorkflowRun{Tasks: []TaskRun{{Key: "task", Status: TaskQueued}}}}
+	if err := transitionTask(&snapshot, 0, TaskCanceled, at, "run canceled"); err != nil {
+		t.Fatalf("queued -> canceled: %v", err)
+	}
+}

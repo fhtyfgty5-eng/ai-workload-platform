@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,6 +51,61 @@ func TestCoordinatorExecuteErrorTriggersFailStop(t *testing.T) {
 	}
 	if coordinator.Ready() {
 		t.Fatal("Coordinator remained ready after Execute error")
+	}
+}
+
+func TestCoordinatorWakeDiscoversPersistedRunOnlyOnceWhileActive(t *testing.T) {
+	store := &fakeRecoveryStore{}
+	engine := newBlockingRunEngine()
+	coordinator := NewCoordinator(
+		store,
+		engine,
+		func(context.Context) (Lock, error) { return &fakeLock{}, nil },
+		CoordinatorOptions{LockCheckInterval: time.Hour, LockCheckTimeout: time.Second},
+	)
+	if err := coordinator.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeCoordinator(t, coordinator) })
+	store.ids = []workflow.RunID{"new-run"}
+	coordinator.Wake()
+	waitForRunID(t, engine.executeStarted, "new-run")
+	coordinator.Wake()
+	select {
+	case duplicate := <-engine.executeStarted:
+		t.Fatalf("Wake() started active Run %s twice", duplicate)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestCoordinatorConcurrentWakeStartsFastRunOnlyOnce(t *testing.T) {
+	store := &fakeRecoveryStore{ids: []workflow.RunID{"fast-run"}}
+	engine := &countingRunEngine{onExecute: func() { store.terminal.Store(true) }}
+	coordinator := NewCoordinator(
+		store,
+		engine,
+		func(context.Context) (Lock, error) { return &fakeLock{}, nil },
+		CoordinatorOptions{LockCheckInterval: time.Hour, LockCheckTimeout: time.Second},
+	)
+	if err := coordinator.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Start 把已有 Run 视为恢复对象；这里只统计后续 Wake 新发现的执行。
+	engine.resumeCount.Store(0)
+	store.ids = []workflow.RunID{"new-fast-run"}
+	var callers sync.WaitGroup
+	for range 100 {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			coordinator.Wake()
+		}()
+	}
+	callers.Wait()
+	time.Sleep(100 * time.Millisecond)
+	closeCoordinator(t, coordinator)
+	if got := engine.executeCount.Load(); got != 1 {
+		t.Fatalf("concurrent Wake() Execute calls = %d, want 1", got)
 	}
 }
 
@@ -247,9 +303,10 @@ func (l *controllableLock) Check(ctx context.Context) error {
 func (l *controllableLock) fail(err error) { l.failures <- err }
 
 type fakeRecoveryStore struct {
-	ids     []workflow.RunID
-	listErr error
-	loadErr error
+	ids      []workflow.RunID
+	listErr  error
+	loadErr  error
+	terminal atomic.Bool
 }
 
 func (f *fakeRecoveryStore) ListNonTerminal(context.Context) ([]workflow.RunID, error) {
@@ -263,13 +320,39 @@ func (f *fakeRecoveryStore) Load(context.Context, workflow.RunID) (workflow.RunS
 	if f.loadErr != nil {
 		return workflow.RunSnapshot{}, f.loadErr
 	}
-	return workflow.RunSnapshot{}, nil
+	if f.terminal.Load() {
+		return workflow.RunSnapshot{Run: workflow.WorkflowRun{Status: workflow.WorkflowSucceeded}}, nil
+	}
+	return workflow.RunSnapshot{Run: workflow.WorkflowRun{Status: workflow.WorkflowPending}}, nil
 }
 
 type fakeRunEngine struct {
 	executeErr error
 	resumeErr  error
 }
+
+type countingRunEngine struct {
+	executeCount atomic.Int32
+	resumeCount  atomic.Int32
+	onExecute    func()
+}
+
+func (e *countingRunEngine) Execute(context.Context, workflow.RunID) (workflow.WorkflowRun, error) {
+	e.executeCount.Add(1)
+	if e.onExecute != nil {
+		e.onExecute()
+	}
+	return workflow.WorkflowRun{Status: workflow.WorkflowSucceeded}, nil
+}
+
+func (e *countingRunEngine) Resume(context.Context, workflow.RunID) (workflow.WorkflowRun, error) {
+	e.resumeCount.Add(1)
+	return workflow.WorkflowRun{Status: workflow.WorkflowSucceeded}, nil
+}
+
+func (e *countingRunEngine) Cancel(context.Context, workflow.RunID) error { return nil }
+
+func (f *fakeRunEngine) Cancel(context.Context, workflow.RunID) error { return nil }
 
 func (f *fakeRunEngine) Execute(context.Context, workflow.RunID) (workflow.WorkflowRun, error) {
 	return workflow.WorkflowRun{}, f.executeErr
@@ -291,6 +374,8 @@ type observedRunEngine struct {
 	executeDone chan workflow.RunID
 	resumeDone  chan workflow.RunID
 }
+
+func (e *observedRunEngine) Cancel(context.Context, workflow.RunID) error { return nil }
 
 func newObservedRunEngine() *observedRunEngine {
 	return &observedRunEngine{executeDone: make(chan workflow.RunID, 1), resumeDone: make(chan workflow.RunID, 1)}
@@ -314,6 +399,8 @@ func newBlockingRunEngine() *blockingRunEngine {
 		release:        make(chan struct{}),
 	}
 }
+
+func (e *blockingRunEngine) Cancel(context.Context, workflow.RunID) error { return nil }
 
 func (e *blockingRunEngine) Execute(ctx context.Context, id workflow.RunID) (workflow.WorkflowRun, error) {
 	e.executeStarted <- id

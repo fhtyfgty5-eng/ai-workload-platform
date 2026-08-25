@@ -6,13 +6,13 @@ import (
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
 
-// DefinitionRef identifies one immutable workflow version exposed by the control plane.
+// DefinitionRef 标识控制面对外暴露的一个不可变工作流版本。
 type DefinitionRef struct {
 	WorkflowID string `json:"workflow_id"`
 	Version    int    `json:"version"`
 }
 
-// WorkflowSummary is the bounded representation returned by workflow list/detail APIs.
+// WorkflowSummary 是工作流列表和详情 API 返回的有界表示。
 type WorkflowSummary struct {
 	WorkflowID    string    `json:"workflow_id"`
 	LatestVersion int       `json:"latest_version"`
@@ -37,13 +37,13 @@ type VersionPage struct {
 	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
-// StartRunResponse is returned after a pending Run has been durably created.
+// StartRunResponse 在 pending Run 持久创建后返回。
 type StartRunResponse struct {
 	RunID  workflow.RunID          `json:"run_id"`
 	Status workflow.WorkflowStatus `json:"status"`
 }
 
-// RunSummary omits Attempt history so list and summary responses remain bounded.
+// RunSummary 不包含 Attempt 历史，避免列表和摘要响应无限增长。
 type RunSummary struct {
 	ID                workflow.RunID          `json:"run_id"`
 	DefinitionID      string                  `json:"workflow_id"`
@@ -76,7 +76,7 @@ type CancelRunResponse struct {
 	CancelRequestedAt time.Time               `json:"cancel_requested_at"`
 }
 
-// TaskSummary is the bounded representation used by task list pages.
+// TaskSummary 是任务列表页使用的有界表示。
 type TaskSummary struct {
 	Key        workflow.TaskKey    `json:"key"`
 	Status     workflow.TaskStatus `json:"status"`
@@ -84,18 +84,18 @@ type TaskSummary struct {
 	FinishedAt *time.Time          `json:"finished_at,omitempty"`
 }
 
-// TaskDetail includes the complete Attempt history for one requested task.
+// TaskDetail 包含指定任务的完整 Attempt 历史。
 type TaskDetail struct {
 	Task workflow.TaskRun `json:"task"`
 }
 
-// TaskPage is a stable task-index page.
+// TaskPage 是按稳定任务索引分页的结果。
 type TaskPage struct {
 	Items      []TaskSummary `json:"items"`
 	NextCursor string        `json:"next_cursor,omitempty"`
 }
 
-// EventPage is a stable event-sequence page.
+// EventPage 是按稳定事件序号分页的结果。
 type EventPage struct {
 	Items      []workflow.StateEvent `json:"items"`
 	NextCursor string                `json:"next_cursor,omitempty"`

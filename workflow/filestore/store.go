@@ -82,7 +82,7 @@ func (s *Store) Save(ctx context.Context, snapshot workflow.RunSnapshot) error {
 	return s.writeLocked(ctx, path, snapshot)
 }
 
-// Apply rebuilds and atomically replaces a full file snapshot from row-level changes.
+// Apply 根据行级变更重建完整文件快照，并以原子替换方式提交。
 func (s *Store) Apply(ctx context.Context, change workflow.ChangeSet) error {
 	path, err := s.path(change.RunID)
 	if err != nil {
@@ -104,7 +104,7 @@ func (s *Store) Apply(ctx context.Context, change workflow.ChangeSet) error {
 	return s.writeLocked(ctx, path, after)
 }
 
-// ListNonTerminal returns Runs in this directory that require startup recovery.
+// ListNonTerminal 返回当前目录中需要启动恢复的 Run。
 func (s *Store) ListNonTerminal(ctx context.Context) ([]workflow.RunID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -130,7 +130,7 @@ func (s *Store) ListNonTerminal(ctx context.Context) ([]workflow.RunID, error) {
 	return ids, nil
 }
 
-// RequestCancel durably records the first cancellation request for a non-terminal Run.
+// RequestCancel 为非终态 Run 持久记录第一次取消请求。
 func (s *Store) RequestCancel(ctx context.Context, id workflow.RunID, at time.Time) (workflow.WorkflowRun, error) {
 	if err := ctx.Err(); err != nil {
 		return workflow.WorkflowRun{}, err

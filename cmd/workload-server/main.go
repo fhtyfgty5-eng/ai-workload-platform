@@ -14,9 +14,10 @@ import (
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/app"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/config"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/dispatch"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/httpapi"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
-	runtimecoord "github.com/fhtyfgty5-eng/ai-workload-platform/internal/runtime"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerapi"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
 
@@ -54,7 +55,10 @@ func serve() error {
 	if err != nil {
 		return err
 	}
-	repository, err := postgres.New(ctx, cfg.DatabaseURL)
+	repository, err := postgres.NewWithOptions(ctx, cfg.DatabaseURL, postgres.Options{
+		WorkerHeartbeatInterval: cfg.HeartbeatInterval,
+		LeaseDuration:           cfg.LeaseDuration,
+	})
 	if err != nil {
 		return err
 	}
@@ -62,18 +66,28 @@ func serve() error {
 	if err := repository.CheckMigrations(ctx); err != nil {
 		return err
 	}
-	engine, err := workflow.NewEngine(repository, newDefaultExecutor(cfg.MockExecutionDelay, logger), workflow.EngineOptions{})
-	if err != nil {
-		return err
-	}
 	definitions := app.NewWorkflowService(repository)
-	coordinator := runtimecoord.NewCoordinator(repository, engine, func(ctx context.Context) (runtimecoord.Lock, error) {
+	coordinator := dispatch.NewCoordinator(repository, func(ctx context.Context) (dispatch.Lock, error) {
 		return repository.AcquireAdvisoryLock(ctx)
-	}, runtimecoord.CoordinatorOptions{Logger: logger})
+	}, dispatch.CoordinatorOptions{
+		ScanInterval: cfg.ReaperInterval, BatchSize: cfg.DispatchLimit,
+	})
 	if err := coordinator.Start(ctx); err != nil {
 		return err
 	}
-	runs, err := app.NewRunService(repository, definitions, engine, coordinator.Enqueue, nil)
+	runs, err := app.NewRunService(repository, definitions, coordinator, nil)
+	if err != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = coordinator.Close(closeCtx)
+		return err
+	}
+	workers, err := workerapi.New(repository, workerapi.Options{
+		BootstrapToken:    cfg.WorkerBootstrapToken,
+		HeartbeatInterval: cfg.HeartbeatInterval,
+		LeaseDuration:     cfg.LeaseDuration,
+		Wake:              coordinator.Wake,
+	})
 	if err != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -81,7 +95,7 @@ func serve() error {
 		return err
 	}
 	logger.Info("workload server ready", "addr", cfg.HTTPAddr)
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewHandler(httpapi.Dependencies{Workflows: definitions, Runs: runs, ViewerToken: cfg.ViewerToken, OperatorToken: cfg.OperatorToken, Ready: coordinator.Ready, Logger: logger})}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewHandler(httpapi.Dependencies{Workflows: definitions, Runs: runs, Workers: workers, ViewerToken: cfg.ViewerToken, OperatorToken: cfg.OperatorToken, Ready: coordinator.Ready, Logger: logger})}
 	return superviseServer(ctx, server, coordinator, 5*time.Second)
 }
 

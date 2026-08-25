@@ -293,11 +293,166 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '500': { $ref: '#/components/responses/InternalError' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workers/register:
+    post:
+      operationId: registerWorker
+      security: [{ workerBootstrapAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterWorkerRequest' }
+      responses:
+        '201':
+          description: A new Worker session was created. The session token is returned only in this response.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterWorkerResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workers/{worker-id}/claims:
+    post:
+      operationId: claimWorkerTasks
+      security: [{ workerSessionAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+        - $ref: '#/components/parameters/WorkerProtocolVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimRequest' }
+      responses:
+        '200':
+          description: A batch of compatible leases. An empty list is a normal idle response.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaimResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/WorkerConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workers/{worker-id}/heartbeat:
+    post:
+      operationId: heartbeatWorker
+      security: [{ workerSessionAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+        - $ref: '#/components/parameters/WorkerProtocolVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HeartbeatRequest' }
+      responses:
+        '200':
+          description: Per-lease renewal state calculated using database time.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HeartbeatResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/WorkerConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workers/{worker-id}/leases/{dispatch-id}/complete:
+    post:
+      operationId: completeWorkerLease
+      security: [{ workerSessionAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+        - $ref: '#/components/parameters/DispatchID'
+        - $ref: '#/components/parameters/WorkerProtocolVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompleteRequest' }
+      responses:
+        '200':
+          description: The result was accepted or safely replayed for the current lease.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompleteResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/WorkerConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workers/{worker-id}/drain:
+    post:
+      operationId: drainWorker
+      security: [{ workerSessionAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+        - $ref: '#/components/parameters/WorkerProtocolVersion'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '200':
+          description: The Worker is no longer eligible to claim new tasks.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkerSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/WorkerConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workers:
+    get:
+      operationId: listWorkers
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A keyset-paginated page of Worker summaries without credentials.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkerPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/workers/{worker-id}:
+    get:
+      operationId: getWorker
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+      responses:
+        '200':
+          description: One Worker summary without credentials.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkerSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+    workerBootstrapAuth:
+      type: http
+      scheme: bearer
+      description: The separately configured bootstrap token accepted only by Worker registration.
+    workerSessionAuth:
+      type: http
+      scheme: bearer
+      description: The one-time session token returned by Worker registration.
   parameters:
     WorkflowID:
       name: workflow-id
@@ -319,6 +474,22 @@ components:
       in: path
       required: true
       schema: { type: string, minLength: 1 }
+    WorkerID:
+      name: worker-id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    DispatchID:
+      name: dispatch-id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    WorkerProtocolVersion:
+      name: X-Worker-Protocol-Version
+      in: header
+      required: true
+      description: Worker protocol version declared by the client.
+      schema: { type: integer, enum: [1] }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -373,6 +544,11 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    WorkerConflict:
+      description: The Worker is draining, over capacity, or the lease is no longer current.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
   schemas:
     HealthResponse:
       type: object
@@ -394,6 +570,8 @@ components:
       required: [key, action, timeout_ms]
       properties:
         key: { type: string, pattern: '^[a-z0-9_-]{1,64}$' }
+        executor:
+          $ref: '#/components/schemas/ExecutorKind'
         action: { type: string, minLength: 1 }
         input:
           type: object
@@ -504,7 +682,7 @@ components:
         cancel_requested_at: { type: string, format: date-time }
     TaskStatus:
       type: string
-      enum: [waiting_dependencies, ready, running, waiting_retry, succeeded, failed, canceled, skipped]
+      enum: [waiting_dependencies, ready, queued, running, waiting_retry, succeeded, failed, canceled, skipped]
     AttemptStatus:
       type: string
       enum: [running, succeeded, failed, timed_out, canceled, interrupted]
@@ -522,6 +700,8 @@ components:
       properties:
         number: { type: integer, minimum: 1 }
         status: { $ref: '#/components/schemas/AttemptStatus' }
+        worker_id: { type: string }
+        dispatch_id: { type: string }
         started_at: { type: string, format: date-time }
         finished_at: { type: string, format: date-time }
         result: { $ref: '#/components/schemas/ExecutionResult' }
@@ -596,3 +776,139 @@ components:
       required: [error]
       properties:
         error: { $ref: '#/components/schemas/ErrorDetail' }
+    ExecutorKind:
+      type: string
+      enum: [mock]
+    RegisterWorkerRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name, protocol_version, executor_kinds, max_concurrency]
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 128 }
+        protocol_version: { type: integer, enum: [1] }
+        executor_kinds:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items: { $ref: '#/components/schemas/ExecutorKind' }
+        max_concurrency: { type: integer, minimum: 1, maximum: 1024 }
+    RegisterWorkerResponse:
+      type: object
+      additionalProperties: false
+      required: [worker_id, session_token, heartbeat_interval_ms, lease_duration_ms, protocol_version]
+      properties:
+        worker_id: { type: string }
+        session_token: { type: string }
+        heartbeat_interval_ms: { type: integer, format: int64, minimum: 1 }
+        lease_duration_ms: { type: integer, format: int64, minimum: 1 }
+        protocol_version: { type: integer, enum: [1] }
+    ClaimRequest:
+      type: object
+      additionalProperties: false
+      required: [slots]
+      properties:
+        slots: { type: integer, minimum: 1 }
+    LeaseRef:
+      type: object
+      additionalProperties: false
+      required: [dispatch_id, lease_token]
+      properties:
+        dispatch_id: { type: string }
+        lease_token: { type: string }
+    Lease:
+      type: object
+      additionalProperties: false
+      required: [dispatch_id, lease_token, definition_id, definition_version, run_id, task_key, executor_kind, action, attempt, attempt_deadline, lease_expires_at]
+      properties:
+        dispatch_id: { type: string }
+        lease_token: { type: string }
+        definition_id: { type: string }
+        definition_version: { type: integer, minimum: 1 }
+        run_id: { type: string }
+        task_key: { type: string }
+        executor_kind: { $ref: '#/components/schemas/ExecutorKind' }
+        action: { type: string }
+        input: { type: object, additionalProperties: true }
+        attempt: { type: integer, minimum: 1 }
+        attempt_deadline: { type: string, format: date-time }
+        lease_expires_at: { type: string, format: date-time }
+    ClaimResponse:
+      type: object
+      additionalProperties: false
+      required: [leases]
+      properties:
+        leases:
+          type: array
+          items: { $ref: '#/components/schemas/Lease' }
+    HeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [leases]
+      properties:
+        leases:
+          type: array
+          maxItems: 1024
+          items: { $ref: '#/components/schemas/LeaseRef' }
+    LeaseHeartbeat:
+      type: object
+      additionalProperties: false
+      required: [dispatch_id, status]
+      properties:
+        dispatch_id: { type: string }
+        status: { type: string, enum: [renewed, revoked, unknown] }
+        lease_remaining_ms: { type: integer, format: int64, minimum: 0 }
+    HeartbeatResponse:
+      type: object
+      additionalProperties: false
+      required: [leases]
+      properties:
+        leases:
+          type: array
+          items: { $ref: '#/components/schemas/LeaseHeartbeat' }
+    CompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [lease_token, result]
+      properties:
+        lease_token: { type: string, minLength: 1 }
+        result:
+          type: object
+          additionalProperties: false
+          required: [kind]
+          properties:
+            kind: { type: string, enum: [success, temporary_failure, permanent_failure] }
+            output: { type: string, maxLength: 65536 }
+            error_code: { type: string, maxLength: 128 }
+            error_message: { type: string, maxLength: 8192 }
+    CompleteResponse:
+      type: object
+      additionalProperties: false
+      required: [applied]
+      properties:
+        applied: { type: boolean }
+    WorkerSummary:
+      type: object
+      additionalProperties: false
+      required: [worker_id, display_name, protocol_version, executor_kinds, max_concurrency, status, active_leases, registered_at, last_heartbeat_at]
+      properties:
+        worker_id: { type: string }
+        display_name: { type: string }
+        protocol_version: { type: integer, enum: [1] }
+        executor_kinds:
+          type: array
+          items: { $ref: '#/components/schemas/ExecutorKind' }
+        max_concurrency: { type: integer, minimum: 1 }
+        status: { type: string, enum: [active, draining, offline, stopped] }
+        active_leases: { type: integer, minimum: 0 }
+        registered_at: { type: string, format: date-time }
+        last_heartbeat_at: { type: string, format: date-time }
+        stopped_at: { type: string, format: date-time }
+    WorkerPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/WorkerSummary' }
+        next_cursor: { type: string }

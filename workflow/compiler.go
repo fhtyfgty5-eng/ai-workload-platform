@@ -27,7 +27,7 @@ type CompiledWorkflow struct {
 	successors [][]int
 }
 
-// Definition returns an isolated copy of the validated workflow definition.
+// Definition 返回经过校验的工作流定义副本，避免调用方修改内部数据。
 func (c *CompiledWorkflow) Definition() WorkflowDefinition {
 	if c == nil || c.definition == nil {
 		return WorkflowDefinition{}
@@ -81,6 +81,12 @@ func Compile(def WorkflowDefinition) (*CompiledWorkflow, error) {
 		}
 		if strings.TrimSpace(task.Action) == "" {
 			return nil, fmt.Errorf("task %q action is required", task.Key)
+		}
+		if task.Executor == "" {
+			task.Executor = ExecutorMock
+		}
+		if task.Executor != ExecutorMock {
+			return nil, fmt.Errorf("task %q executor %q is not supported", task.Key, task.Executor)
 		}
 		if task.TimeoutMillis <= 0 {
 			return nil, fmt.Errorf("task %q timeout must be greater than zero", task.Key)

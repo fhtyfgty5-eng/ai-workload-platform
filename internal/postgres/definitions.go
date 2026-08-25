@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// CreateDefinition atomically creates a logical Workflow, version 1, and its idempotency record.
+// CreateDefinition 原子创建逻辑 Workflow、版本 1 及其幂等记录。
 func (r *Repository) CreateDefinition(
 	ctx context.Context,
 	definition workflow.WorkflowDefinition,
@@ -77,7 +77,7 @@ func (r *Repository) CreateDefinition(
 	return DefinitionRecord{WorkflowID: definition.ID, Version: version}, nil
 }
 
-// CreateVersion atomically increments latest_version and stores an immutable definition.
+// CreateVersion 原子递增 latest_version 并保存一份不可变定义。
 func (r *Repository) CreateVersion(
 	ctx context.Context,
 	workflowID string,
@@ -147,7 +147,7 @@ func (r *Repository) CreateVersion(
 	return DefinitionRecord{WorkflowID: workflowID, Version: version}, nil
 }
 
-// LoadDefinition returns one exact immutable workflow definition version.
+// LoadDefinition 返回指定的不可变工作流定义版本。
 func (r *Repository) LoadDefinition(ctx context.Context, workflowID string, version int) (workflow.WorkflowDefinition, error) {
 	var body []byte
 	err := r.pool.QueryRow(ctx, `
@@ -165,7 +165,11 @@ func (r *Repository) LoadDefinition(ctx context.Context, workflowID string, vers
 	if err := decodeJSONNumber(body, &definition); err != nil {
 		return workflow.WorkflowDefinition{}, fmt.Errorf("decode workflow definition: %w", err)
 	}
-	return definition, nil
+	compiled, err := workflow.Compile(definition)
+	if err != nil {
+		return workflow.WorkflowDefinition{}, fmt.Errorf("compile stored workflow definition: %w", err)
+	}
+	return compiled.Definition(), nil
 }
 
 func decodeJSONNumber(body []byte, target any) error {

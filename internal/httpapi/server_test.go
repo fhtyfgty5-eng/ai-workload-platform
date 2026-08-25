@@ -14,8 +14,95 @@ import (
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/app"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerapi"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
+
+func TestHandlerSeparatesWorkerAndControlPlaneAuthentication(t *testing.T) {
+	workers := &fakeWorkerHandler{}
+	handler := NewHandler(Dependencies{
+		ViewerToken: "viewer-secret", OperatorToken: "operator-secret",
+		Ready: func() bool { return true }, Workers: workers,
+	})
+
+	register := httptest.NewRequest(http.MethodPost, "/api/v1/workers/register", strings.NewReader(`{}`))
+	register.Header.Set("Authorization", "Bearer bootstrap-secret")
+	registerRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(registerRecorder, register)
+	if registerRecorder.Code != http.StatusCreated || workers.calls != 1 {
+		t.Fatalf("register response/calls = %d/%d, want 201/1", registerRecorder.Code, workers.calls)
+	}
+
+	queryWithoutUserToken := httptest.NewRequest(http.MethodGet, "/api/v1/workers", nil)
+	queryWithoutUserToken.Header.Set("Authorization", "Bearer bootstrap-secret")
+	queryRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(queryRecorder, queryWithoutUserToken)
+	if queryRecorder.Code != http.StatusUnauthorized || workers.calls != 1 {
+		t.Fatalf("query with bootstrap response/calls = %d/%d, want 401/1", queryRecorder.Code, workers.calls)
+	}
+
+	query := httptest.NewRequest(http.MethodGet, "/api/v1/workers", nil)
+	query.Header.Set("Authorization", "Bearer viewer-secret")
+	queryRecorder = httptest.NewRecorder()
+	handler.ServeHTTP(queryRecorder, query)
+	if queryRecorder.Code != http.StatusOK || workers.calls != 2 {
+		t.Fatalf("viewer query response/calls = %d/%d, want 200/2", queryRecorder.Code, workers.calls)
+	}
+}
+
+func TestHandlerWritesWorkerErrorEnvelopeWithOuterRequestID(t *testing.T) {
+	workers := &fakeWorkerHandler{handleErr: &workerapi.APIError{
+		Status: http.StatusConflict, Code: "lease_lost", Message: "Worker lease is no longer current",
+	}}
+	handler := NewHandler(Dependencies{
+		ViewerToken: "viewer-secret", OperatorToken: "operator-secret",
+		Ready: func() bool { return true }, Workers: workers,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/workers/wrk_test/heartbeat", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer session-secret")
+	request.Header.Set("X-Request-ID", "req-worker-error")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", recorder.Code)
+	}
+	var body errorBody
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != "lease_lost" || body.Error.RequestID != "req-worker-error" {
+		t.Fatalf("error body = %+v", body)
+	}
+}
+
+type fakeWorkerHandler struct {
+	calls     int
+	handleErr *workerapi.APIError
+}
+
+func (f *fakeWorkerHandler) Matches(path string) bool {
+	return strings.HasPrefix(path, "/api/v1/workers")
+}
+
+func (f *fakeWorkerHandler) RequiresWorkerCredentials(path string) bool {
+	return path != "/api/v1/workers" && path != "/api/v1/workers/wrk_test"
+}
+
+func (f *fakeWorkerHandler) Handle(w http.ResponseWriter, _ *http.Request, requestID string) *workerapi.APIError {
+	f.calls++
+	if f.handleErr != nil {
+		result := *f.handleErr
+		result.RequestID = requestID
+		return &result
+	}
+	if f.calls == 1 {
+		writeJSON(w, http.StatusCreated, map[string]string{"worker_id": "wrk_test"})
+	} else {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+	}
+	return nil
+}
 
 func TestHandlerHealthDoesNotRequireToken(t *testing.T) {
 	handler := NewHandler(Dependencies{Ready: func() bool { return true }})

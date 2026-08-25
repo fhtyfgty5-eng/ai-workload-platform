@@ -17,13 +17,17 @@ import (
 
 // Service 协调模型、受控工具、校验器、预算和审计，不直接访问控制面。
 type Service struct {
-	model       ModelAdapter
-	tools       *ToolRegistry
-	validator   *DraftValidator
-	audit       AuditSink
-	limits      Limits
+	// model 只负责生成协议响应；tools 和 validator 分别约束模型可调用的能力与最终草稿。
+	model     ModelAdapter
+	tools     *ToolRegistry
+	validator *DraftValidator
+	// audit 记录非敏感运行事件；limits 为每次 GenerateDraft 创建独立预算。
+	audit  AuditSink
+	limits Limits
+	// permissions 是 Service 创建时取得的权限快照，工具调用不会接受模型自行声明权限。
 	permissions []string
-	now         func() time.Time
+	// now 允许测试固定审计和确认时间，生产环境使用 time.Now。
+	now func() time.Time
 }
 
 // NewService 创建只依赖显式模型、工具、校验器和审计接收器的 Agent 服务。

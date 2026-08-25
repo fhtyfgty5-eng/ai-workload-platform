@@ -31,11 +31,11 @@ const (
 	resourceRun             = "run"
 )
 
-// DefinitionRecord identifies one immutable workflow definition version.
+// DefinitionRecord 标识一个不可变的工作流定义版本。
 type DefinitionRecord struct {
-	// WorkflowID is the stable logical workflow identifier.
+	// WorkflowID 是逻辑工作流的稳定标识。
 	WorkflowID string
-	// Version is the immutable version number within WorkflowID.
+	// Version 是同一 WorkflowID 下不可变的版本号。
 	Version int
 }
 
@@ -79,9 +79,18 @@ type TaskRecord struct {
 	Task  workflow.TaskRun
 }
 
-// Repository stores workflow definitions and Run state in PostgreSQL.
+// Repository 在 PostgreSQL 中保存工作流定义和 Run 状态。
 type Repository struct {
-	pool *pgxpool.Pool
+	pool                    *pgxpool.Pool
+	workerHeartbeatInterval time.Duration
+	leaseDuration           time.Duration
+}
+
+// Options 控制由数据库判定的 Worker 存活状态和租约时间阈值。
+// PostgreSQL 始终是时间事实来源，这些时长只定义判定阈值。
+type Options struct {
+	WorkerHeartbeatInterval time.Duration
+	LeaseDuration           time.Duration
 }
 
 const coordinatorAdvisoryLockKey int64 = 82473619
@@ -137,7 +146,7 @@ func (l *advisoryLock) Check(ctx context.Context) error {
 	return nil
 }
 
-// AcquireAdvisoryLock keeps one dedicated pool connection while the control plane is active.
+// AcquireAdvisoryLock 在控制面存活期间持续占用一条专用连接来持有 Advisory Lock。
 func (r *Repository) AcquireAdvisoryLock(ctx context.Context) (*advisoryLock, error) {
 	conn, err := r.pool.Acquire(ctx)
 	if err != nil {
@@ -155,10 +164,25 @@ func (r *Repository) AcquireAdvisoryLock(ctx context.Context) (*advisoryLock, er
 	return &advisoryLock{conn: conn}, nil
 }
 
-// New connects to PostgreSQL and verifies connectivity without changing the schema.
+// New 连接 PostgreSQL 并验证连接可用性，但不修改数据库结构。
 func New(ctx context.Context, databaseURL string) (*Repository, error) {
+	return NewWithOptions(ctx, databaseURL, Options{})
+}
+
+// NewWithOptions 使用显式 Worker 时间阈值连接 PostgreSQL。
+// 零值继续采用文档约定的默认值，保证现有调用方和工具兼容。
+func NewWithOptions(ctx context.Context, databaseURL string, options Options) (*Repository, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, fmt.Errorf("database URL is required")
+	}
+	if options.WorkerHeartbeatInterval == 0 {
+		options.WorkerHeartbeatInterval = defaultWorkerHeartbeatInterval
+	}
+	if options.LeaseDuration == 0 {
+		options.LeaseDuration = defaultLeaseDuration
+	}
+	if options.WorkerHeartbeatInterval <= 0 || options.LeaseDuration <= options.WorkerHeartbeatInterval {
+		return nil, fmt.Errorf("Worker lease duration must exceed the heartbeat interval")
 	}
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -168,10 +192,14 @@ func New(ctx context.Context, databaseURL string) (*Repository, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping PostgreSQL: %w", err)
 	}
-	return &Repository{pool: pool}, nil
+	return &Repository{
+		pool:                    pool,
+		workerHeartbeatInterval: options.WorkerHeartbeatInterval,
+		leaseDuration:           options.LeaseDuration,
+	}, nil
 }
 
-// Close releases all PostgreSQL connections owned by the Repository.
+// Close 释放 Repository 持有的全部 PostgreSQL 连接。
 func (r *Repository) Close() {
 	if r != nil && r.pool != nil {
 		r.pool.Close()

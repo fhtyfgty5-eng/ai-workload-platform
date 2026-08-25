@@ -1,4 +1,4 @@
-// Package testpostgres provides isolated PostgreSQL databases for integration tests.
+// Package testpostgres 为集成测试提供相互隔离的 PostgreSQL 数据库。
 package testpostgres
 
 import (
@@ -22,8 +22,8 @@ type testingTB interface {
 	Fatalf(format string, args ...any)
 }
 
-// NewIsolatedDatabaseURL creates a temporary database derived from baseURL.
-// The database is removed after repository connections registered later by the test are closed.
+// NewIsolatedDatabaseURL 根据 baseURL 创建临时数据库。
+// 测试关闭后续注册的 Repository 连接后，该数据库会被删除。
 func NewIsolatedDatabaseURL(t testingTB, baseURL string) string {
 	t.Helper()
 	if strings.TrimSpace(baseURL) == "" {

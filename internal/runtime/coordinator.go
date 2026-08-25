@@ -30,6 +30,7 @@ type RecoveryStore interface {
 type RunEngine interface {
 	Execute(context.Context, workflow.RunID) (workflow.WorkflowRun, error)
 	Resume(context.Context, workflow.RunID) (workflow.WorkflowRun, error)
+	Cancel(context.Context, workflow.RunID) error
 }
 
 type LockAcquirer func(context.Context) (Lock, error)
@@ -43,21 +44,29 @@ type CoordinatorOptions struct {
 
 // Coordinator 统一监督 Run 执行和单实例锁；任一系统错误都会取消同进程的其他执行。
 type Coordinator struct {
+	// store 提供恢复事实，engine 推进 Run，acquire 获取本进程的单协调器所有权。
 	store   RecoveryStore
 	engine  RunEngine
 	acquire LockAcquirer
+	// options 保存锁检查周期和日志器，构造后只读。
 	options CoordinatorOptions
 
-	mu        sync.RWMutex
-	ready     bool
-	started   bool
-	closing   bool
-	lock      Lock
-	runCtx    context.Context
-	cancel    context.CancelFunc
+	// mu 保护以下生命周期和 active 字段，避免启动、接管、失败与关闭并发改变状态。
+	mu sync.RWMutex
+	// ready 表示可接管 Run；started 防止重复启动；closing 阻止关闭后新增执行。
+	ready   bool
+	started bool
+	closing bool
+	// lock 是当前所有权凭据；runCtx/cancel 共同控制受监督 Run 和锁检查循环。
+	lock   Lock
+	runCtx context.Context
+	cancel context.CancelFunc
+	// closeDone/closeErr 协调并发关闭；active 防止同一 Run 在本进程重复启动。
 	closeDone chan struct{}
 	closeErr  error
+	active    map[workflow.RunID]struct{}
 
+	// errors 只发布首个致命错误；fatal 保证失败处理一次；wg 等待全部后台工作退出。
 	errors chan error
 	fatal  sync.Once
 	wg     sync.WaitGroup
@@ -80,6 +89,7 @@ func NewCoordinator(store RecoveryStore, engine RunEngine, acquire LockAcquirer,
 		options:   options,
 		errors:    make(chan error, 1),
 		closeDone: make(chan struct{}),
+		active:    make(map[workflow.RunID]struct{}),
 	}
 }
 
@@ -141,8 +151,94 @@ func (c *Coordinator) Enqueue(id workflow.RunID) {
 	c.startRunLocked(id, false)
 }
 
+// Wake 为 RunController 兼容边界发现新持久化的 Run。
+// active 集合防止重复唤醒并发启动同一个 Run。
+func (c *Coordinator) Wake() {
+	c.mu.Lock()
+	if !c.ready || c.closing {
+		c.mu.Unlock()
+		return
+	}
+	ctx := c.runCtx
+	c.wg.Add(1)
+	c.mu.Unlock()
+	go c.discoverRuns(ctx)
+}
+
+func (c *Coordinator) discoverRuns(ctx context.Context) {
+	defer c.wg.Done()
+	ids, err := c.store.ListNonTerminal(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			c.fail(fmt.Errorf("discover non-terminal Runs: %w", err))
+		}
+		return
+	}
+	for _, id := range ids {
+		// 必须先占用再加载，避免并发 Wake 扫描同时认为同一个 Run 可以启动。
+		c.mu.Lock()
+		if !c.ready || c.closing {
+			c.mu.Unlock()
+			return
+		}
+		if _, exists := c.active[id]; exists {
+			c.mu.Unlock()
+			continue
+		}
+		c.active[id] = struct{}{}
+		c.mu.Unlock()
+
+		snapshot, err := c.store.Load(ctx, id)
+		if err != nil {
+			c.releaseRunReservation(id)
+			if ctx.Err() == nil {
+				c.fail(fmt.Errorf("load discovered Run %s: %w", id, err))
+			}
+			return
+		}
+		if workflow.IsWorkflowTerminalForStore(snapshot.Run.Status) {
+			c.releaseRunReservation(id)
+			continue
+		}
+		resume := snapshot.Run.Status != workflow.WorkflowPending || snapshot.Run.Revision > 0
+		c.mu.Lock()
+		if c.ready && !c.closing {
+			c.startReservedRunLocked(id, resume)
+		} else {
+			delete(c.active, id)
+		}
+		c.mu.Unlock()
+	}
+}
+
+func (c *Coordinator) releaseRunReservation(id workflow.RunID) {
+	c.mu.Lock()
+	delete(c.active, id)
+	c.mu.Unlock()
+}
+
+// Cancel 在共享 RunController 接口后保留模块 2 的本地 Engine 行为。
+func (c *Coordinator) Cancel(ctx context.Context, id workflow.RunID) error {
+	c.mu.RLock()
+	ready := c.ready && !c.closing
+	c.mu.RUnlock()
+	if !ready {
+		return fmt.Errorf("coordinator is not ready")
+	}
+	return c.engine.Cancel(ctx, id)
+}
+
 // startRunLocked 要求调用方持有 c.mu，以保证 WaitGroup.Add 不会与 Close 的 Wait 竞态。
 func (c *Coordinator) startRunLocked(id workflow.RunID, resume bool) {
+	if _, exists := c.active[id]; exists {
+		return
+	}
+	c.active[id] = struct{}{}
+	c.startReservedRunLocked(id, resume)
+}
+
+// startReservedRunLocked 启动已经被 active 集合占用的 ID；调用方必须持有 c.mu。
+func (c *Coordinator) startReservedRunLocked(id workflow.RunID, resume bool) {
 	c.wg.Add(1)
 	ctx := c.runCtx
 	operation := "execution"
@@ -151,7 +247,12 @@ func (c *Coordinator) startRunLocked(id workflow.RunID, resume bool) {
 	}
 	c.options.Logger.Info("run "+operation+" started", "run_id", id)
 	go func() {
-		defer c.wg.Done()
+		defer func() {
+			c.mu.Lock()
+			delete(c.active, id)
+			c.mu.Unlock()
+			c.wg.Done()
+		}()
 		var (
 			run workflow.WorkflowRun
 			err error

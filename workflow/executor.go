@@ -31,13 +31,13 @@ type ExecutionRequest struct {
 // ExecutionResponse 保存 Executor 的结构化结果，不直接改变调度状态。
 type ExecutionResponse struct {
 	// Kind 标识执行成功、临时失败、永久失败或取消等结果类别。
-	Kind ResultKind
+	Kind ResultKind `json:"kind"`
 	// Output 是执行器返回的最小结果；模块 1 暂不提供独立产物存储。
-	Output string
+	Output string `json:"output,omitempty"`
 	// ErrorCode 是供调度与调用方识别错误类别的稳定机器码。
-	ErrorCode string
+	ErrorCode string `json:"error_code,omitempty"`
 	// ErrorMessage 是供人阅读的错误说明，不参与重试分类判断。
-	ErrorMessage string
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // Executor 执行单次任务尝试，并通过 Context 响应超时和取消。

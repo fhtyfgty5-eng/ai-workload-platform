@@ -18,7 +18,7 @@ const (
 	maxPageSize     = 100
 )
 
-// RunService owns versioned Run creation, bounded queries, and cancellation ordering.
+// RunService 负责版本化 Run 创建、有界查询和取消顺序。
 type RunService interface {
 	Start(context.Context, string, string, int, string) (StartRunResponse, error)
 	List(context.Context, RunListOptions) (RunPage, error)
@@ -39,30 +39,30 @@ type runRepository interface {
 	RequestCancel(context.Context, workflow.RunID, time.Time) (workflow.WorkflowRun, error)
 }
 
-type runEngine interface {
+// RunController 隔离 Run 持久化与本地执行或分布式分发方式。
+type RunController interface {
+	Wake()
 	Cancel(context.Context, workflow.RunID) error
 }
 
 type runIDGenerator func() (workflow.RunID, error)
-type runEnqueuer func(workflow.RunID)
 
 type runService struct {
 	repository  runRepository
 	definitions WorkflowService
-	engine      runEngine
-	enqueue     runEnqueuer
+	controller  RunController
 	newRunID    runIDGenerator
 }
 
-// NewRunService constructs a service that persists before enqueueing execution.
-func NewRunService(repository runRepository, definitions WorkflowService, engine runEngine, enqueue runEnqueuer, newRunID runIDGenerator) (RunService, error) {
-	if enqueue == nil {
-		return nil, fmt.Errorf("run enqueuer is required")
+// NewRunService 创建始终先持久化、再通知执行控制器的服务。
+func NewRunService(repository runRepository, definitions WorkflowService, controller RunController, newRunID runIDGenerator) (RunService, error) {
+	if controller == nil {
+		return nil, fmt.Errorf("run controller is required")
 	}
 	if newRunID == nil {
 		newRunID = randomRunID
 	}
-	return &runService{repository: repository, definitions: definitions, engine: engine, enqueue: enqueue, newRunID: newRunID}, nil
+	return &runService{repository: repository, definitions: definitions, controller: controller, newRunID: newRunID}, nil
 }
 
 func (s *runService) Start(ctx context.Context, principal, workflowID string, version int, key string) (StartRunResponse, error) {
@@ -83,7 +83,7 @@ func (s *runService) Start(ctx context.Context, principal, workflowID string, ve
 		return StartRunResponse{}, err
 	}
 	if created {
-		s.enqueue(createdID)
+		s.controller.Wake()
 	}
 	return StartRunResponse{RunID: createdID, Status: workflow.WorkflowPending}, nil
 }
@@ -214,7 +214,7 @@ func (s *runService) Cancel(ctx context.Context, _ string, id workflow.RunID) (C
 	if err != nil {
 		return CancelRunResponse{}, err
 	}
-	if err := s.engine.Cancel(ctx, id); err != nil {
+	if err := s.controller.Cancel(ctx, id); err != nil {
 		return CancelRunResponse{}, err
 	}
 	if run.CancelRequestedAt == nil {

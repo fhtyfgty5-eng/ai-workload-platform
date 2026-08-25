@@ -6,7 +6,7 @@ import (
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
 
-// DefinitionRef identifies one immutable workflow definition version.
+// DefinitionRef 标识一个不可变的工作流定义版本。
 type DefinitionRef struct {
 	WorkflowID string `json:"workflow_id"`
 	Version    int    `json:"version"`
@@ -41,7 +41,7 @@ type StartRunResponse struct {
 	Status workflow.WorkflowStatus `json:"status"`
 }
 
-// RunSummary omits Attempt history so list and detail responses stay bounded.
+// RunSummary 不包含 Attempt 历史，避免列表和详情响应无限增长。
 type RunSummary struct {
 	ID                workflow.RunID          `json:"run_id"`
 	DefinitionID      string                  `json:"workflow_id"`

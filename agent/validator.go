@@ -19,6 +19,7 @@ const MaxWorkflowConcurrency = 32
 
 // DraftValidator 只读取草稿和目录，不调用模型、工具或控制面。
 type DraftValidator struct {
+	// catalog 是允许 Action 和 Input 的事实来源；permissions 是构造时复制的调用方权限快照。
 	catalog     TemplateCatalog
 	permissions []string
 }

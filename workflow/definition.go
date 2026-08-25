@@ -3,6 +3,14 @@ package workflow
 // TaskKey 是任务在单个工作流定义中的唯一正式标识。
 type TaskKey string
 
+// ExecutorKind 标识允许解释任务 Action 的执行器实现类型。
+type ExecutorKind string
+
+const (
+	// ExecutorMock 是真实执行环境完成前唯一允许的执行器类型。
+	ExecutorMock ExecutorKind = "mock"
+)
+
 // RetryPolicy 描述任务允许的最大尝试次数和固定重试间隔。
 type RetryPolicy struct {
 	// MaxAttempts 是包含首次执行在内的最大 Attempt 总数；零值在编译时归一为 1。
@@ -15,6 +23,8 @@ type RetryPolicy struct {
 type TaskDefinition struct {
 	// Key 是任务在当前工作流定义中的唯一正式标识。
 	Key TaskKey `json:"key"`
+	// Executor 选择执行器类型；省略时，编译器会将其规范化为 mock。
+	Executor ExecutorKind `json:"executor,omitempty"`
 	// Action 是传给 Executor 的不透明动作名称，工作流内核不会把它解释为命令或代码。
 	Action string `json:"action"`
 	// Input 是传给 Executor 的可选 JSON 对象；内核只校验和复制，不解释其中业务字段。

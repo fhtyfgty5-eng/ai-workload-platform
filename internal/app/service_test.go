@@ -52,12 +52,29 @@ func TestWorkflowServiceCreatesAndCachesVersion(t *testing.T) {
 		t.Fatalf("compiled() error = %v", err)
 	}
 	wantDefinition := definition
+	wantDefinition.Tasks[0].Executor = workflow.ExecutorMock
 	wantDefinition.Tasks[0].Retry.MaxAttempts = 1
 	if !reflect.DeepEqual(compiled.Definition(), wantDefinition) {
 		t.Fatalf("cached definition = %+v, want %+v", compiled.Definition(), wantDefinition)
 	}
 	if repository.createDefinitionCalls != 1 {
 		t.Fatalf("CreateDefinition() calls = %d, want 1", repository.createDefinitionCalls)
+	}
+}
+
+func TestDefinitionHashTreatsMissingAndExplicitDefaultExecutorAsEquivalent(t *testing.T) {
+	withoutExecutor := appDefinition()
+	explicitMock := appDefinition()
+	explicitMock.Tasks[0].Executor = workflow.ExecutorMock
+
+	if got, want := definitionHash(explicitMock), definitionHash(withoutExecutor); got != want {
+		t.Fatalf("explicit mock hash = %s, want legacy missing-executor hash %s", got, want)
+	}
+
+	explicitAgent := appDefinition()
+	explicitAgent.Tasks[0].Executor = workflow.ExecutorKind("agent")
+	if definitionHash(explicitAgent) == definitionHash(withoutExecutor) {
+		t.Fatal("non-default executor unexpectedly shares the default executor hash")
 	}
 }
 
@@ -111,13 +128,17 @@ func TestWorkflowServiceUsesScopedKeysetCursors(t *testing.T) {
 	}
 }
 
-func TestRunServiceStartsPendingRunAndEnqueuesAfterPersistence(t *testing.T) {
+func TestRunServiceStartsPendingRunAndWakesControllerAfterPersistence(t *testing.T) {
 	repository := newFakeRepository()
 	repository.definitions["document-pipeline/1"] = appDefinition()
 	runID := workflow.RunID("run-one")
 	repository.createRunID = runID
-	var enqueued workflow.RunID
-	service := mustNewRunService(t, repository, &fakeEngine{}, func(id workflow.RunID) { enqueued = id }, func() (workflow.RunID, error) { return runID, nil })
+	controller := &fakeEngine{onWake: func() {
+		if repository.createRunCalls != 1 {
+			t.Fatalf("Wake() observed CreateRun calls = %d, want persisted Run first", repository.createRunCalls)
+		}
+	}}
+	service := mustNewRunService(t, repository, controller, func() (workflow.RunID, error) { return runID, nil })
 
 	response, err := service.Start(context.Background(), "operator", "document-pipeline", 1, "start-key")
 	if err != nil {
@@ -126,25 +147,25 @@ func TestRunServiceStartsPendingRunAndEnqueuesAfterPersistence(t *testing.T) {
 	if response != (StartRunResponse{RunID: runID, Status: workflow.WorkflowPending}) {
 		t.Fatalf("Start() = %+v", response)
 	}
-	if enqueued != runID {
-		t.Fatalf("enqueued RunID = %q, want %q", enqueued, runID)
+	if controller.wakeCalls != 1 {
+		t.Fatalf("Wake() calls = %d, want 1", controller.wakeCalls)
 	}
 	if repository.createRunCalls != 1 {
 		t.Fatalf("CreateRun() calls = %d, want 1", repository.createRunCalls)
 	}
 }
 
-func TestNewRunServiceRejectsMissingEnqueuer(t *testing.T) {
+func TestNewRunServiceRejectsMissingController(t *testing.T) {
 	repository := newFakeRepository()
-	_, err := NewRunService(repository, NewWorkflowService(repository), &fakeEngine{}, nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "run enqueuer is required") {
-		t.Fatalf("NewRunService() error = %v, want missing enqueuer error", err)
+	_, err := NewRunService(repository, NewWorkflowService(repository), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "run controller is required") {
+		t.Fatalf("NewRunService() error = %v, want missing controller error", err)
 	}
 }
 
 func TestRunServiceRejectsUnknownDefinitionVersion(t *testing.T) {
 	repository := newFakeRepository()
-	service := mustNewRunService(t, repository, &fakeEngine{}, func(workflow.RunID) {}, func() (workflow.RunID, error) { return "run-one", nil })
+	service := mustNewRunService(t, repository, &fakeEngine{}, func() (workflow.RunID, error) { return "run-one", nil })
 
 	if _, err := service.Start(context.Background(), "operator", "missing", 2, "start-key"); !errors.Is(err, postgres.ErrDefinitionNotFound) {
 		t.Fatalf("Start() error = %v, want ErrDefinitionNotFound", err)
@@ -159,16 +180,16 @@ func TestRunServiceDoesNotEnqueueIdempotentReplay(t *testing.T) {
 	repository.definitions["document-pipeline/1"] = appDefinition()
 	repository.createRunID = "run-one"
 	repository.createRunCreated = []bool{true, false}
-	enqueued := 0
-	service := mustNewRunService(t, repository, &fakeEngine{}, func(workflow.RunID) { enqueued++ }, func() (workflow.RunID, error) { return "run-one", nil })
+	controller := &fakeEngine{}
+	service := mustNewRunService(t, repository, controller, func() (workflow.RunID, error) { return "run-one", nil })
 
 	for range 2 {
 		if _, err := service.Start(context.Background(), "operator", "document-pipeline", 1, "same-key"); err != nil {
 			t.Fatalf("Start() error = %v", err)
 		}
 	}
-	if enqueued != 1 {
-		t.Fatalf("enqueue calls = %d, want 1", enqueued)
+	if controller.wakeCalls != 1 {
+		t.Fatalf("Wake() calls = %d, want 1", controller.wakeCalls)
 	}
 }
 
@@ -179,7 +200,7 @@ func TestRunServiceFiltersWithStableCursor(t *testing.T) {
 		ID: "run-one", DefinitionID: "document-pipeline", Status: workflow.WorkflowRunning, CreatedAt: createdAt,
 	}}
 	repository.runRecordsMore = true
-	service := mustNewRunService(t, repository, &fakeEngine{}, func(workflow.RunID) {}, nil)
+	service := mustNewRunService(t, repository, &fakeEngine{}, nil)
 	options := RunListOptions{WorkflowID: "document-pipeline", Status: "running", Limit: 1}
 
 	first, err := service.List(context.Background(), options)
@@ -215,7 +236,7 @@ func TestRunServiceSummaryDoesNotLoadAttemptHistory(t *testing.T) {
 	run := appRun()
 	repository.runs[run.ID] = run
 	repository.tasks[run.ID] = []workflow.TaskRun{{Key: "clean"}, {Key: "summarize"}}
-	service := mustNewRunService(t, repository, &fakeEngine{}, func(workflow.RunID) {}, nil)
+	service := mustNewRunService(t, repository, &fakeEngine{}, nil)
 
 	summary, err := service.Get(context.Background(), run.ID)
 	if err != nil {
@@ -243,7 +264,7 @@ func TestRunServicePaginatesTasksAndEvents(t *testing.T) {
 		{Sequence: 2, Entity: "task", To: "running"},
 		{Sequence: 3, Entity: "task", To: "succeeded"},
 	}
-	service := mustNewRunService(t, repository, &fakeEngine{}, func(workflow.RunID) {}, nil)
+	service := mustNewRunService(t, repository, &fakeEngine{}, nil)
 
 	tasks, err := service.ListTasks(context.Background(), run.ID, "", 2)
 	if err != nil {
@@ -278,7 +299,7 @@ func TestRunServicePaginatesTasksAndEvents(t *testing.T) {
 
 func TestRunServiceRejectsInvalidPageParametersBeforeRepository(t *testing.T) {
 	repository := newFakeRepository()
-	service := mustNewRunService(t, repository, &fakeEngine{}, func(workflow.RunID) {}, nil)
+	service := mustNewRunService(t, repository, &fakeEngine{}, nil)
 
 	if _, err := service.ListTasks(context.Background(), "run-one", "bad", 1); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatal("ListTasks() error = nil, want invalid cursor error")
@@ -298,8 +319,12 @@ func TestRunServiceCancelPersistsBeforeNotifyingEngine(t *testing.T) {
 	repository := newFakeRepository()
 	run := appRun()
 	repository.runs[run.ID] = run
-	engine := &fakeEngine{}
-	service := mustNewRunService(t, repository, engine, func(workflow.RunID) {}, func() (workflow.RunID, error) { return "run-two", nil })
+	engine := &fakeEngine{onCancel: func() {
+		if repository.cancelCalls != 1 || repository.cancelAt.IsZero() {
+			t.Fatalf("Controller observed cancellation before persistence: calls=%d at=%v", repository.cancelCalls, repository.cancelAt)
+		}
+	}}
+	service := mustNewRunService(t, repository, engine, func() (workflow.RunID, error) { return "run-two", nil })
 
 	if _, err := service.Cancel(context.Background(), "operator", run.ID); err != nil {
 		t.Fatalf("Cancel() error = %v", err)
@@ -327,12 +352,11 @@ func appRun() workflow.WorkflowRun {
 func mustNewRunService(
 	t *testing.T,
 	repository *fakeRepository,
-	engine runEngine,
-	enqueue runEnqueuer,
+	controller RunController,
 	newRunID runIDGenerator,
 ) RunService {
 	t.Helper()
-	service, err := NewRunService(repository, NewWorkflowService(repository), engine, enqueue, newRunID)
+	service, err := NewRunService(repository, NewWorkflowService(repository), controller, newRunID)
 	if err != nil {
 		t.Fatal(err)
 	}

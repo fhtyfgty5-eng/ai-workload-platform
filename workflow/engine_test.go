@@ -154,11 +154,11 @@ func TestEngineDoesNotUnlockDependencyTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.Run.Tasks[0].Attempts = append(snapshot.Run.Tasks[0].Attempts, Attempt{Number: 1, Status: AttemptRunning, StartedAt: now})
-	completion := executionCompletion{taskIndex: 0, attempt: 1, response: ExecutionResponse{Kind: ResultSuccess}, finished: now}
-	if applied, err := applyCompletion(&snapshot, compiled, completion); err != nil || !applied {
+	response := ExecutionResponse{Kind: ResultSuccess}
+	if applied, err := ApplyAttemptResult(&snapshot, compiled, 0, 1, response, now); err != nil || !applied {
 		t.Fatalf("first completion = applied:%t err:%v, want applied", applied, err)
 	}
-	if applied, err := applyCompletion(&snapshot, compiled, completion); err != nil || applied {
+	if applied, err := ApplyAttemptResult(&snapshot, compiled, 0, 1, response, now); err != nil || applied {
 		t.Fatalf("duplicate completion = applied:%t err:%v, want ignored", applied, err)
 	}
 	if got := snapshot.Run.RemainingDependencies[1]; got != 0 {

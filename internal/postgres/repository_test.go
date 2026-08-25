@@ -41,8 +41,13 @@ func TestRepositoryMigratesAndCreatesVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDefinition() error = %v", err)
 	}
-	if !reflect.DeepEqual(loaded, definition) {
-		t.Fatalf("LoadDefinition() = %+v, want %+v", loaded, definition)
+	compiled, err := workflow.Compile(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDefinition := compiled.Definition()
+	if !reflect.DeepEqual(loaded, wantDefinition) {
+		t.Fatalf("LoadDefinition() = %+v, want %+v", loaded, wantDefinition)
 	}
 }
 
@@ -221,8 +226,13 @@ func TestRepositoryRebuildsSnapshot(t *testing.T) {
 	if len(loaded.Events) != 3 || loaded.Events[2].Sequence != 3 {
 		t.Fatalf("loaded Events = %+v", loaded.Events)
 	}
-	if loaded.Definition == nil || !reflect.DeepEqual(*loaded.Definition, *snapshot.Definition) {
-		t.Fatalf("loaded Definition = %+v, want %+v", loaded.Definition, snapshot.Definition)
+	compiled, err := workflow.Compile(*snapshot.Definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDefinition := compiled.Definition()
+	if loaded.Definition == nil || !reflect.DeepEqual(*loaded.Definition, wantDefinition) {
+		t.Fatalf("loaded Definition = %+v, want %+v", loaded.Definition, wantDefinition)
 	}
 }
 
@@ -656,13 +666,17 @@ func TestRepositoryCheckMigrationsRejectsMissingSchemaAndAcceptsCurrentSchema(t 
 	if err := repository.CheckMigrations(ctx); err != nil {
 		t.Fatalf("CheckMigrations() after Migrate error = %v", err)
 	}
-	if _, err := repository.pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version = (SELECT max(version) FROM schema_migrations)"); err != nil {
+	var latestVersion int64
+	if err := repository.pool.QueryRow(ctx, "SELECT max(version) FROM schema_migrations").Scan(&latestVersion); err != nil {
+		t.Fatalf("load latest migration version: %v", err)
+	}
+	if _, err := repository.pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version = $1", latestVersion); err != nil {
 		t.Fatalf("delete migration record: %v", err)
 	}
 	if err := repository.CheckMigrations(ctx); err == nil {
 		t.Fatal("CheckMigrations() error = nil, want version mismatch")
 	}
-	if _, err := repository.pool.Exec(ctx, "INSERT INTO schema_migrations (version) VALUES (2)"); err != nil {
+	if _, err := repository.pool.Exec(ctx, "INSERT INTO schema_migrations (version) VALUES ($1)", latestVersion); err != nil {
 		t.Fatalf("restore migration record: %v", err)
 	}
 }

@@ -1,5 +1,5 @@
-// Package auth provides the deliberately small token-to-role boundary used by
-// the single-instance control plane. It does not issue, refresh, or persist tokens.
+// Package auth 提供单实例控制面使用的最小 Token 到角色映射边界。
+// 本包不负责签发、刷新或持久化 Token。
 package auth
 
 import (
@@ -24,7 +24,7 @@ var (
 
 type contextKey struct{}
 
-// ParseBearerToken accepts exactly "Bearer <token>" with one ASCII space.
+// ParseBearerToken 只接受使用一个 ASCII 空格分隔的 "Bearer <token>" 格式。
 func ParseBearerToken(header string) (string, error) {
 	if header == "" || strings.Count(header, " ") != 1 {
 		return "", ErrUnauthorized
@@ -38,7 +38,7 @@ func ParseBearerToken(header string) (string, error) {
 	return parts[1], nil
 }
 
-// Authenticator maps two configured tokens to the two roles supported in module 2.
+// Authenticator 把两个配置 Token 映射为模块 2 支持的两种角色。
 type Authenticator struct {
 	viewerToken   string
 	operatorToken string
@@ -78,7 +78,7 @@ func RoleFromContext(ctx context.Context) (Role, bool) {
 	return role, ok
 }
 
-// RequireRole checks the role already attached by an authentication middleware.
+// RequireRole 检查认证中间件已经写入 Context 的角色。
 func RequireRole(role Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actual, ok := RoleFromContext(r.Context())

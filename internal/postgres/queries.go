@@ -127,7 +127,7 @@ func (r *Repository) ListRunSummaries(ctx context.Context, query RunQuery, limit
 	return items, more, nil
 }
 
-// LoadRun reads only the workflow_runs row and task count, without Attempt history.
+// LoadRun 只读取 workflow_runs 记录和任务数量，不加载 Attempt 历史。
 func (r *Repository) LoadRun(ctx context.Context, id workflow.RunID) (workflow.WorkflowRun, error) {
 	var run workflow.WorkflowRun
 	var revision int64
@@ -170,7 +170,7 @@ func (r *Repository) LoadRun(ctx context.Context, id workflow.RunID) (workflow.W
 	return run, nil
 }
 
-// ListTaskRuns reads one stable task_index page without Attempt history.
+// ListTaskRuns 按稳定 task_index 读取一页任务，不加载 Attempt 历史。
 func (r *Repository) ListTaskRuns(ctx context.Context, id workflow.RunID, afterIndex, limit int) ([]TaskRecord, bool, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT task_index, task_key, status, ready_at, finished_at
@@ -207,7 +207,7 @@ func (r *Repository) ListTaskRuns(ctx context.Context, id workflow.RunID, afterI
 	return items, more, nil
 }
 
-// LoadTaskRun reads one task and its ordered Attempt history.
+// LoadTaskRun 读取一个任务及其按编号排序的 Attempt 历史。
 func (r *Repository) LoadTaskRun(ctx context.Context, id workflow.RunID, key workflow.TaskKey) (workflow.TaskRun, error) {
 	var task workflow.TaskRun
 	err := r.pool.QueryRow(ctx, `
@@ -226,7 +226,8 @@ func (r *Repository) LoadTaskRun(ctx context.Context, id workflow.RunID, key wor
 	}
 	task.Attempts = []workflow.Attempt{}
 	rows, err := r.pool.Query(ctx, `
-		SELECT attempt_number, status, started_at, finished_at, output, error_code, error_message
+		SELECT attempt_number, status, started_at, finished_at, output, error_code, error_message,
+		       COALESCE(worker_id, ''), COALESCE(dispatch_id, '')
 		FROM attempts
 		WHERE run_id = $1 AND task_key = $2
 		ORDER BY attempt_number
@@ -237,7 +238,17 @@ func (r *Repository) LoadTaskRun(ctx context.Context, id workflow.RunID, key wor
 	defer rows.Close()
 	for rows.Next() {
 		var attempt workflow.Attempt
-		if err := rows.Scan(&attempt.Number, &attempt.Status, &attempt.StartedAt, &attempt.FinishedAt, &attempt.Result.Output, &attempt.Result.ErrorCode, &attempt.Result.ErrorMessage); err != nil {
+		if err := rows.Scan(
+			&attempt.Number,
+			&attempt.Status,
+			&attempt.StartedAt,
+			&attempt.FinishedAt,
+			&attempt.Result.Output,
+			&attempt.Result.ErrorCode,
+			&attempt.Result.ErrorMessage,
+			&attempt.WorkerID,
+			&attempt.DispatchID,
+		); err != nil {
 			return workflow.TaskRun{}, fmt.Errorf("scan task Attempt: %w", err)
 		}
 		task.Attempts = append(task.Attempts, attempt)
@@ -248,7 +259,7 @@ func (r *Repository) LoadTaskRun(ctx context.Context, id workflow.RunID, key wor
 	return task, nil
 }
 
-// ListStateEvents reads events after one sequence and reports whether another page exists.
+// ListStateEvents 读取指定序号之后的事件，并报告是否还有下一页。
 func (r *Repository) ListStateEvents(ctx context.Context, id workflow.RunID, after uint64, limit int) ([]workflow.StateEvent, bool, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT sequence, occurred_at, entity_type, entity_key, from_status, to_status, reason

@@ -160,9 +160,22 @@ func (f *fakeRepository) RequestCancel(_ context.Context, id workflow.RunID, at 
 
 type fakeEngine struct {
 	cancelCalls int
+	wakeCalls   int
+	onWake      func()
+	onCancel    func()
+}
+
+func (f *fakeEngine) Wake() {
+	f.wakeCalls++
+	if f.onWake != nil {
+		f.onWake()
+	}
 }
 
 func (f *fakeEngine) Cancel(context.Context, workflow.RunID) error {
+	if f.onCancel != nil {
+		f.onCancel()
+	}
 	f.cancelCalls++
 	return nil
 }

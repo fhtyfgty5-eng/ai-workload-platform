@@ -9,8 +9,10 @@ import (
 
 // Limits 限制一次 Agent 生成会话的循环次数、响应大小和总时长。
 type Limits struct {
-	MaxModelTurns    int
-	MaxToolCalls     int
+	// MaxModelTurns 和 MaxToolCalls 限制模型续轮与受控工具调用总次数。
+	MaxModelTurns int
+	MaxToolCalls  int
+	// MaxResponseBytes 限制单次模型或工具响应；两个 Timeout 分别限制整次会话和单次工具调用。
 	MaxResponseBytes int
 	RuntimeTimeout   time.Duration
 	ToolTimeout      time.Duration
@@ -23,8 +25,10 @@ func DefaultLimits() Limits {
 
 // Budget 是一次生成会话独享的并发安全计数器。
 type Budget struct {
-	mu         sync.Mutex
-	limits     Limits
+	// mu 保护两个已用计数；limits 在构造后只读，可由并发模型与工具路径共享。
+	mu     sync.Mutex
+	limits Limits
+	// modelTurns 和 toolCalls 记录已消耗额度，而不是剩余额度。
 	modelTurns int
 	toolCalls  int
 }

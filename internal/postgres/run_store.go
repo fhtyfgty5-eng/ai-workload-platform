@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 	"github.com/jackc/pgx/v5"
 )
 
-// Create implements workflow.RunStore for callers that do not need control-plane idempotency.
+// Create 为不需要控制面幂等语义的调用方实现 workflow.RunStore。
 func (r *Repository) Create(ctx context.Context, snapshot workflow.RunSnapshot) error {
 	if err := validateInitialSnapshot(snapshot); err != nil {
 		return err
@@ -34,7 +33,7 @@ func (r *Repository) Create(ctx context.Context, snapshot workflow.RunSnapshot) 
 	return nil
 }
 
-// CreateRun atomically creates a versioned Run and its idempotency record.
+// CreateRun 原子创建绑定版本的 Run 及其幂等记录。
 // 重放相同请求时返回首次创建的 RunID，不插入第二份 Run 或 TaskRun。
 func (r *Repository) CreateRun(
 	ctx context.Context,
@@ -177,7 +176,7 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, snapshot workflow.RunSnapsho
 	return nil
 }
 
-// Apply commits one row-level workflow.ChangeSet with optimistic revision control.
+// Apply 使用乐观 revision 控制提交一组行级 workflow.ChangeSet。
 func (r *Repository) Apply(ctx context.Context, change workflow.ChangeSet) error {
 	if err := validateChangeSetShape(change); err != nil {
 		return err
@@ -187,7 +186,19 @@ func (r *Repository) Apply(ctx context.Context, change workflow.ChangeSet) error
 		return fmt.Errorf("begin applying ChangeSet: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := applyChangeSetTx(ctx, tx, change); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit ChangeSet: %w", err)
+	}
+	return nil
+}
 
+func applyChangeSetTx(ctx context.Context, tx pgx.Tx, change workflow.ChangeSet) error {
+	if err := validateChangeSetShape(change); err != nil {
+		return err
+	}
 	expectedLastSequence := change.Run.LastEventSequence
 	if len(change.Events) > 0 {
 		expectedLastSequence = change.Events[0].Sequence - 1
@@ -254,7 +265,9 @@ func (r *Repository) Apply(ctx context.Context, change workflow.ChangeSet) error
 					finished_at = $7,
 					output = $8,
 					error_code = $9,
-					error_message = $10
+					error_message = $10,
+					worker_id = $11,
+					dispatch_id = $12
 				WHERE run_id = $1 AND task_key = $2 AND attempt_number = $3
 				AND EXISTS (
 					SELECT 1 FROM task_runs
@@ -271,6 +284,8 @@ func (r *Repository) Apply(ctx context.Context, change workflow.ChangeSet) error
 				attempt.Attempt.Result.Output,
 				attempt.Attempt.Result.ErrorCode,
 				attempt.Attempt.Result.ErrorMessage,
+				nullableText(attempt.Attempt.WorkerID),
+				nullableText(attempt.Attempt.DispatchID),
 			)
 			if err != nil {
 				return fmt.Errorf("update Attempt %s/%d: %w", attempt.TaskKey, attempt.Attempt.Number, err)
@@ -286,9 +301,6 @@ func (r *Repository) Apply(ctx context.Context, change workflow.ChangeSet) error
 		if err := insertEvent(ctx, tx, change.RunID, event); err != nil {
 			return err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit ChangeSet: %w", err)
 	}
 	return nil
 }
@@ -372,9 +384,9 @@ func insertAttempt(ctx context.Context, tx pgx.Tx, runID workflow.RunID, taskKey
 	result, err := tx.Exec(ctx, `
 		INSERT INTO attempts (
 			run_id, task_key, attempt_number, status, started_at,
-			finished_at, output, error_code, error_message
+			finished_at, output, error_code, error_message, worker_id, dispatch_id
 		)
-		SELECT $1, $2, $4, $5, $6, $7, $8, $9, $10
+		SELECT $1, $2, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		FROM task_runs
 		WHERE run_id = $1 AND task_key = $2 AND task_index = $3
 		  AND $4 = COALESCE((SELECT MAX(attempt_number) + 1 FROM attempts WHERE run_id = $1 AND task_key = $2), 1)
@@ -389,6 +401,8 @@ func insertAttempt(ctx context.Context, tx pgx.Tx, runID workflow.RunID, taskKey
 		attempt.Result.Output,
 		attempt.Result.ErrorCode,
 		attempt.Result.ErrorMessage,
+		nullableText(attempt.WorkerID),
+		nullableText(attempt.DispatchID),
 	)
 	if err != nil {
 		return fmt.Errorf("insert Attempt %s/%d: %w", taskKey, attempt.Number, err)
@@ -397,6 +411,13 @@ func insertAttempt(ctx context.Context, tx pgx.Tx, runID workflow.RunID, taskKey
 		return fmt.Errorf("%w: Attempt task %q does not match index %d", workflow.ErrInvalidChangeSet, taskKey, taskIndex)
 	}
 	return nil
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func ensureDefinitionMatches(ctx context.Context, tx pgx.Tx, snapshot workflow.RunSnapshot) error {
@@ -419,19 +440,27 @@ func ensureDefinitionMatches(ctx context.Context, tx pgx.Tx, snapshot workflow.R
 	if err := stored.Scan(&body); err != nil {
 		return fmt.Errorf("scan Run definition version: %w", err)
 	}
-	want, err := json.Marshal(*snapshot.Definition)
+	var storedDefinition workflow.WorkflowDefinition
+	if err := decodeJSONNumber(body, &storedDefinition); err != nil {
+		return fmt.Errorf("decode stored Run definition: %w", err)
+	}
+	storedCompiled, err := workflow.Compile(storedDefinition)
+	if err != nil {
+		return fmt.Errorf("compile stored Run definition: %w", err)
+	}
+	wantedCompiled, err := workflow.Compile(*snapshot.Definition)
+	if err != nil {
+		return fmt.Errorf("compile Run definition: %w", err)
+	}
+	storedCanonical, err := json.Marshal(storedCompiled.Definition())
+	if err != nil {
+		return fmt.Errorf("encode stored Run definition: %w", err)
+	}
+	wantedCanonical, err := json.Marshal(wantedCompiled.Definition())
 	if err != nil {
 		return fmt.Errorf("encode Run definition: %w", err)
 	}
-	var storedValue any
-	var wantedValue any
-	if err := decodeJSONNumber(body, &storedValue); err != nil {
-		return fmt.Errorf("decode stored Run definition: %w", err)
-	}
-	if err := decodeJSONNumber(want, &wantedValue); err != nil {
-		return fmt.Errorf("decode Run definition: %w", err)
-	}
-	if !reflect.DeepEqual(storedValue, wantedValue) {
+	if string(storedCanonical) != string(wantedCanonical) {
 		return fmt.Errorf("Run snapshot definition does not match workflow version")
 	}
 	return nil
@@ -450,7 +479,7 @@ func insertEvent(ctx context.Context, tx pgx.Tx, runID workflow.RunID, event wor
 	return nil
 }
 
-// Load rebuilds one workflow.RunSnapshot from normalized relation rows.
+// Load 根据规范化的关系表记录重建一个 workflow.RunSnapshot。
 func (r *Repository) Load(ctx context.Context, id workflow.RunID) (workflow.RunSnapshot, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -510,6 +539,11 @@ func loadSnapshot(ctx context.Context, tx pgx.Tx, id workflow.RunID) (workflow.R
 	if err := decodeJSONNumber(definitionJSON, &definition); err != nil {
 		return workflow.RunSnapshot{}, fmt.Errorf("decode stored workflow definition: %w", err)
 	}
+	compiled, err := workflow.Compile(definition)
+	if err != nil {
+		return workflow.RunSnapshot{}, fmt.Errorf("compile stored workflow definition: %w", err)
+	}
+	definition = compiled.Definition()
 	snapshot.Definition = &definition
 	snapshot.Run.Tasks = make([]workflow.TaskRun, 0, len(definition.Tasks))
 	snapshot.Run.RemainingDependencies = make([]int, 0, len(definition.Tasks))
@@ -552,7 +586,8 @@ func loadSnapshot(ctx context.Context, tx pgx.Tx, id workflow.RunID) (workflow.R
 	attemptRows, err := tx.Query(ctx, `
 		SELECT
 			t.task_index, a.task_key, a.attempt_number, a.status,
-			a.started_at, a.finished_at, a.output, a.error_code, a.error_message
+			a.started_at, a.finished_at, a.output, a.error_code, a.error_message,
+			COALESCE(a.worker_id, ''), COALESCE(a.dispatch_id, '')
 		FROM attempts a
 		JOIN task_runs t ON t.run_id = a.run_id AND t.task_key = a.task_key
 		WHERE a.run_id = $1
@@ -575,6 +610,8 @@ func loadSnapshot(ctx context.Context, tx pgx.Tx, id workflow.RunID) (workflow.R
 			&attempt.Result.Output,
 			&attempt.Result.ErrorCode,
 			&attempt.Result.ErrorMessage,
+			&attempt.WorkerID,
+			&attempt.DispatchID,
 		); err != nil {
 			attemptRows.Close()
 			return workflow.RunSnapshot{}, fmt.Errorf("scan Attempt: %w", err)
@@ -630,7 +667,7 @@ func loadSnapshot(ctx context.Context, tx pgx.Tx, id workflow.RunID) (workflow.R
 	return snapshot, nil
 }
 
-// ListNonTerminal returns Run IDs that require startup recovery in stable creation order.
+// ListNonTerminal 按稳定创建顺序返回需要启动恢复的 Run ID。
 func (r *Repository) ListNonTerminal(ctx context.Context) ([]workflow.RunID, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT run_id
@@ -656,7 +693,7 @@ func (r *Repository) ListNonTerminal(ctx context.Context) ([]workflow.RunID, err
 	return ids, nil
 }
 
-// RequestCancel records the first cancellation request for a non-terminal Run.
+// RequestCancel 为非终态 Run 记录第一次取消请求。
 func (r *Repository) RequestCancel(ctx context.Context, id workflow.RunID, at time.Time) (workflow.WorkflowRun, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -695,5 +732,5 @@ func (r *Repository) RequestCancel(ctx context.Context, id workflow.RunID, at ti
 	return snapshot.Run, nil
 }
 
-// Compile-time interface checks keep the Engine persistence boundary explicit.
+// 编译期接口检查用于明确约束 Engine 的持久化边界。
 var _ workflow.Persistence = (*Repository)(nil)

@@ -5,7 +5,7 @@ import (
 	"reflect"
 )
 
-// ChangeSet describes one Run state change that must be committed atomically.
+// ChangeSet 描述一次必须原子提交的 Run 状态变化。
 // Run、Tasks、Attempts 和 Events 分别对应关系存储中的行，存储实现不能拆成多次提交。
 type ChangeSet struct {
 	// RunID 是所有行级变更共同所属的 Run，也是存储定位事务目标的主键。
@@ -20,7 +20,7 @@ type ChangeSet struct {
 	Events   []StateEvent
 }
 
-// TaskRunChange describes changed non-Attempt fields for one task row.
+// TaskRunChange 描述一条任务记录中发生变化的非 Attempt 字段。
 type TaskRunChange struct {
 	// RunID 和 Task.Key 组成任务行的稳定身份；Index 只供 Engine 和 FileStore O(1) 定位数组元素。
 	RunID RunID
@@ -31,17 +31,17 @@ type TaskRunChange struct {
 	RemainingDependencies int
 }
 
-// ChangeOperation distinguishes a new row from an update to an existing row.
+// ChangeOperation 区分新增记录和更新已有记录。
 type ChangeOperation string
 
 const (
-	// ChangeInsert marks a row that does not exist in the persisted Attempt history yet.
+	// ChangeInsert 表示该记录尚未存在于已持久化的 Attempt 历史中。
 	ChangeInsert ChangeOperation = "insert"
-	// ChangeUpdate marks a row that already exists and advances to a new state.
+	// ChangeUpdate 表示该记录已经存在，本次把它推进到新状态。
 	ChangeUpdate ChangeOperation = "update"
 )
 
-// AttemptChange describes an insert or update for one Attempt row.
+// AttemptChange 描述一条 Attempt 记录的新增或更新。
 type AttemptChange struct {
 	// RunID、TaskKey 和 Attempt.Number 共同构成 Attempt 行的稳定身份。
 	RunID   RunID
@@ -228,7 +228,7 @@ func applyChangeSet(snapshot RunSnapshot, change ChangeSet) (RunSnapshot, error)
 	return updated, nil
 }
 
-// ApplyChangeSetForStore rebuilds a compatible snapshot from validated row-level changes.
+// ApplyChangeSetForStore 根据经过校验的行级变更重建兼容快照。
 func ApplyChangeSetForStore(snapshot RunSnapshot, change ChangeSet) (RunSnapshot, error) {
 	return applyChangeSet(snapshot, change)
 }

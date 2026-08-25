@@ -6,7 +6,7 @@ import (
 	"github.com/fhtyfgty5-eng/ai-workload-platform/pkg/workloadclient"
 )
 
-// publicClient captures the SDK surface an external Go module must be able to name.
+// publicClient 固定外部 Go 模块必须能够引用的 SDK 接口范围。
 type publicClient interface {
 	GetWorkflow(context.Context, string) (workloadclient.WorkflowSummary, error)
 	ListRuns(context.Context, string, int) (workloadclient.RunPage, error)

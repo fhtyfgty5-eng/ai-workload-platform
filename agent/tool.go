@@ -59,6 +59,7 @@ type ToolResponse struct {
 
 // ToolRegistry 保存显式注册的工具并在调用前检查权限。
 type ToolRegistry struct {
+	// tools 以模型协议中的稳定工具名定位实现和平台要求的权限；构造后只读。
 	tools map[string]RegisteredTool
 }
 

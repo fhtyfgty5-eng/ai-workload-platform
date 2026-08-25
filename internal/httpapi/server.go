@@ -1,4 +1,4 @@
-// Package httpapi exposes the versioned control-plane HTTP contract.
+// Package httpapi 暴露版本化控制面的 HTTP 契约。
 package httpapi
 
 import (
@@ -18,15 +18,17 @@ import (
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/app"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/auth"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerapi"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
 
 const defaultBodyLimit int64 = 1 << 20
 
-// Dependencies contains application services and process readiness state.
+// Dependencies 保存应用服务和进程就绪状态。
 type Dependencies struct {
 	Workflows     app.WorkflowService
 	Runs          app.RunService
+	Workers       WorkerHandler
 	ViewerToken   string
 	OperatorToken string
 	Ready         func() bool
@@ -34,10 +36,17 @@ type Dependencies struct {
 	Logger        *slog.Logger
 }
 
-// Routes returns the paths implemented by this handler. The list is also used
-// by the OpenAPI contract test to keep public documentation and registration aligned.
+// WorkerHandler 使共享 HTTP 中间件不依赖 Worker 的具体存储实现。
+type WorkerHandler interface {
+	Matches(string) bool
+	RequiresWorkerCredentials(string) bool
+	Handle(http.ResponseWriter, *http.Request, string) *workerapi.APIError
+}
+
+// Routes 返回当前 Handler 实现的路径。OpenAPI 契约测试也使用该列表，
+// 以保证公开文档与实际路由注册保持一致。
 func Routes() []string {
-	return []string{
+	routes := []string{
 		"/api/v1/workflows",
 		"/api/v1/workflows/{workflow-id}",
 		"/api/v1/workflows/{workflow-id}/versions",
@@ -50,9 +59,10 @@ func Routes() []string {
 		"/api/v1/runs/{run-id}/events",
 		"/api/v1/runs/{run-id}/cancel",
 	}
+	return append(routes, workerapi.Routes()...)
 }
 
-// NewServer constructs an HTTP server without starting a listener.
+// NewServer 创建 HTTP 服务，但不启动网络监听。
 func NewServer(deps Dependencies) *http.Server {
 	return &http.Server{Handler: NewHandler(deps)}
 }
@@ -94,6 +104,12 @@ func NewHandler(deps Dependencies) http.Handler {
 			writeAPIError(w, requestID, http.StatusServiceUnavailable, "not_ready", "service is not ready")
 			return
 		}
+		// Bootstrap 和会话路由拥有独立 Bearer Token，必须在 viewer/operator
+		// 认证前分发，避免两类凭据进入同一个认证域。
+		if deps.Workers != nil && deps.Workers.Matches(r.URL.Path) && deps.Workers.RequiresWorkerCredentials(r.URL.Path) {
+			handleWorkerRequest(w, r, deps, requestID, routePath)
+			return
+		}
 		if authErr != nil {
 			writeAPIError(w, requestID, http.StatusInternalServerError, "auth_config_invalid", "authentication configuration is invalid")
 			return
@@ -101,6 +117,10 @@ func NewHandler(deps Dependencies) http.Handler {
 		role, err := authenticator.Role(r.Header.Get("Authorization"))
 		if err != nil {
 			writeAPIError(w, requestID, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+		if deps.Workers != nil && deps.Workers.Matches(r.URL.Path) {
+			handleWorkerRequest(w, r, deps, requestID, routePath)
 			return
 		}
 		if err := dispatch(r.Context(), w, r, deps, role, requestID); err != nil {
@@ -112,6 +132,18 @@ func NewHandler(deps Dependencies) http.Handler {
 			writeAPIError(w, requestID, status, code, message)
 		}
 	})
+}
+
+func handleWorkerRequest(w http.ResponseWriter, r *http.Request, deps Dependencies, requestID, routePath string) {
+	apiErr := deps.Workers.Handle(w, r, requestID)
+	if apiErr == nil {
+		return
+	}
+	if apiErr.Status == http.StatusInternalServerError {
+		// Worker 错误沿用控制面错误的规则，只记录非敏感元数据。
+		deps.Logger.Error("http request failed", "request_id", requestID, "method", r.Method, "path", routePath, "error_code", apiErr.Code, "error", apiErr)
+	}
+	writeAPIError(w, requestID, apiErr.Status, apiErr.Code, apiErr.Message)
 }
 
 type loggingResponseWriter struct {
@@ -384,6 +416,20 @@ func normalizedPath(path string) string {
 			return "/api/v1/runs/{run-id}/tasks/{task-key}"
 		}
 	}
+	if parts[2] == "workers" {
+		switch {
+		case len(parts) == 3:
+			return "/api/v1/workers"
+		case len(parts) == 4 && parts[3] == "register":
+			return "/api/v1/workers/register"
+		case len(parts) == 4:
+			return "/api/v1/workers/{worker-id}"
+		case len(parts) == 5 && (parts[4] == "claims" || parts[4] == "heartbeat" || parts[4] == "drain"):
+			return "/api/v1/workers/{worker-id}/" + parts[4]
+		case len(parts) == 7 && parts[4] == "leases" && parts[6] == "complete":
+			return "/api/v1/workers/{worker-id}/leases/{dispatch-id}/complete"
+		}
+	}
 	return "unmatched"
 }
 
@@ -409,6 +455,18 @@ func mappedError(err error) (int, string, string) {
 		status, code, message = http.StatusConflict, "workflow_exists", "workflow already exists"
 	case errors.Is(err, postgres.ErrIdempotencyConflict):
 		status, code, message = http.StatusConflict, "idempotency_conflict", "idempotency key conflicts with an earlier request"
+	case errors.Is(err, postgres.ErrWorkerSessionInvalid):
+		status, code, message = http.StatusUnauthorized, "worker_session_invalid", "Worker session is invalid"
+	case errors.Is(err, postgres.ErrWorkerProtocolUnsupported):
+		status, code, message = http.StatusBadRequest, "worker_protocol_unsupported", "Worker protocol version is not supported"
+	case errors.Is(err, postgres.ErrWorkerDraining):
+		status, code, message = http.StatusConflict, "worker_draining", "Worker is draining"
+	case errors.Is(err, postgres.ErrWorkerCapacityExceeded):
+		status, code, message = http.StatusConflict, "worker_capacity_exceeded", "Worker capacity is exceeded"
+	case errors.Is(err, postgres.ErrLeaseLost):
+		status, code, message = http.StatusConflict, "lease_lost", "Worker lease is no longer current"
+	case errors.Is(err, postgres.ErrResultConflict):
+		status, code, message = http.StatusConflict, "result_conflict", "Worker lease result conflicts with an earlier result"
 	case errors.Is(err, app.ErrInvalidArgument):
 		status, code, message = http.StatusBadRequest, "invalid_request", err.Error()
 	case errors.As(err, &bad):

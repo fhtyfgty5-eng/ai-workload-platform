@@ -25,6 +25,7 @@ const (
 const (
 	TaskWaitingDependencies TaskStatus = "waiting_dependencies"
 	TaskReady               TaskStatus = "ready"
+	TaskQueued              TaskStatus = "queued"
 	TaskRunning             TaskStatus = "running"
 	TaskWaitingRetry        TaskStatus = "waiting_retry"
 	TaskSucceeded           TaskStatus = "succeeded"
@@ -50,7 +51,8 @@ var workflowTransitions = map[WorkflowStatus]map[WorkflowStatus]bool{
 
 var taskTransitions = map[TaskStatus]map[TaskStatus]bool{
 	TaskWaitingDependencies: {TaskReady: true, TaskCanceled: true, TaskSkipped: true},
-	TaskReady:               {TaskRunning: true, TaskCanceled: true, TaskSkipped: true},
+	TaskReady:               {TaskQueued: true, TaskRunning: true, TaskCanceled: true, TaskSkipped: true},
+	TaskQueued:              {TaskRunning: true, TaskReady: true, TaskCanceled: true},
 	TaskRunning:             {TaskSucceeded: true, TaskWaitingRetry: true, TaskFailed: true, TaskCanceled: true},
 	TaskWaitingRetry:        {TaskReady: true, TaskFailed: true, TaskCanceled: true},
 }

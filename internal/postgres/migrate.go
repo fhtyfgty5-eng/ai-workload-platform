@@ -20,7 +20,7 @@ type embeddedMigration struct {
 	version int64
 }
 
-// Migrate applies every pending embedded migration in version order.
+// Migrate 按版本顺序应用所有尚未执行的内嵌迁移。
 // 每份迁移及其版本记录位于同一事务中，SQL 失败不会留下半套表结构。
 func (r *Repository) Migrate(ctx context.Context) error {
 	migrations, err := embeddedMigrations()
@@ -66,7 +66,7 @@ func (r *Repository) Migrate(ctx context.Context) error {
 	return validateMigrationSet(embedded, applied)
 }
 
-// CheckMigrations verifies the embedded schema is already applied without changing it.
+// CheckMigrations 检查内嵌数据库结构是否已经完整应用，但不修改数据库。
 func (r *Repository) CheckMigrations(ctx context.Context) error {
 	embedded, err := embeddedMigrationVersions()
 	if err != nil {

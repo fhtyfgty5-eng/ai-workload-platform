@@ -4,30 +4,73 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const maxMockExecutionDelay = 5 * time.Minute
 
+const (
+	defaultHeartbeatInterval = 5 * time.Second
+	defaultLeaseDuration     = 15 * time.Second
+	defaultReaperInterval    = time.Second
+	defaultDispatchLimit     = 100
+)
+
 type Config struct {
-	DatabaseURL        string
-	HTTPAddr           string
-	ViewerToken        string
-	OperatorToken      string
-	LogLevel           string
-	LogFormat          string
-	MockExecutionDelay time.Duration
+	DatabaseURL          string
+	HTTPAddr             string
+	ViewerToken          string
+	OperatorToken        string
+	WorkerBootstrapToken string
+	HeartbeatInterval    time.Duration
+	LeaseDuration        time.Duration
+	ReaperInterval       time.Duration
+	DispatchLimit        int
+	LogLevel             string
+	LogFormat            string
+	MockExecutionDelay   time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
 	config := Config{
-		DatabaseURL:   strings.TrimSpace(getenv("DATABASE_URL")),
-		HTTPAddr:      strings.TrimSpace(getenv("WORKLOAD_HTTP_ADDR")),
-		ViewerToken:   strings.TrimSpace(getenv("WORKLOAD_VIEWER_TOKEN")),
-		OperatorToken: strings.TrimSpace(getenv("WORKLOAD_OPERATOR_TOKEN")),
-		LogLevel:      strings.TrimSpace(getenv("WORKLOAD_LOG_LEVEL")),
-		LogFormat:     strings.TrimSpace(getenv("WORKLOAD_LOG_FORMAT")),
+		DatabaseURL:          strings.TrimSpace(getenv("DATABASE_URL")),
+		HTTPAddr:             strings.TrimSpace(getenv("WORKLOAD_HTTP_ADDR")),
+		ViewerToken:          strings.TrimSpace(getenv("WORKLOAD_VIEWER_TOKEN")),
+		OperatorToken:        strings.TrimSpace(getenv("WORKLOAD_OPERATOR_TOKEN")),
+		WorkerBootstrapToken: strings.TrimSpace(getenv("WORKLOAD_WORKER_BOOTSTRAP_TOKEN")),
+		HeartbeatInterval:    defaultHeartbeatInterval,
+		LeaseDuration:        defaultLeaseDuration,
+		ReaperInterval:       defaultReaperInterval,
+		DispatchLimit:        defaultDispatchLimit,
+		LogLevel:             strings.TrimSpace(getenv("WORKLOAD_LOG_LEVEL")),
+		LogFormat:            strings.TrimSpace(getenv("WORKLOAD_LOG_FORMAT")),
+	}
+	var parseErr error
+	if value := strings.TrimSpace(getenv("WORKLOAD_HEARTBEAT_INTERVAL")); value != "" {
+		config.HeartbeatInterval, parseErr = time.ParseDuration(value)
+		if parseErr != nil {
+			return Config{}, fmt.Errorf("WORKLOAD_HEARTBEAT_INTERVAL must be a Go duration: %w", parseErr)
+		}
+	}
+	if value := strings.TrimSpace(getenv("WORKLOAD_LEASE_TTL")); value != "" {
+		config.LeaseDuration, parseErr = time.ParseDuration(value)
+		if parseErr != nil {
+			return Config{}, fmt.Errorf("WORKLOAD_LEASE_TTL must be a Go duration: %w", parseErr)
+		}
+	}
+	if value := strings.TrimSpace(getenv("WORKLOAD_LEASE_REAPER_INTERVAL")); value != "" {
+		config.ReaperInterval, parseErr = time.ParseDuration(value)
+		if parseErr != nil {
+			return Config{}, fmt.Errorf("WORKLOAD_LEASE_REAPER_INTERVAL must be a Go duration: %w", parseErr)
+		}
+	}
+	if value := strings.TrimSpace(getenv("WORKLOAD_DISPATCH_LIMIT")); value != "" {
+		config.DispatchLimit, parseErr = strconv.Atoi(value)
+		if parseErr != nil {
+			return Config{}, fmt.Errorf("WORKLOAD_DISPATCH_LIMIT must be an integer: %w", parseErr)
+		}
 	}
 	delayValue := strings.TrimSpace(getenv("WORKLOAD_MOCK_EXECUTION_DELAY"))
 	if delayValue != "" {
@@ -65,6 +108,15 @@ func (c Config) Validate() error {
 	}
 	if c.ViewerToken == c.OperatorToken {
 		return fmt.Errorf("viewer and operator tokens must differ")
+	}
+	if strings.TrimSpace(c.WorkerBootstrapToken) == "" {
+		return fmt.Errorf("WORKLOAD_WORKER_BOOTSTRAP_TOKEN is required")
+	}
+	if c.WorkerBootstrapToken == c.ViewerToken || c.WorkerBootstrapToken == c.OperatorToken {
+		return fmt.Errorf("Worker bootstrap token must differ from viewer and operator tokens")
+	}
+	if c.HeartbeatInterval <= 0 || c.LeaseDuration <= c.HeartbeatInterval || c.ReaperInterval <= 0 || c.DispatchLimit <= 0 || c.DispatchLimit > 10000 {
+		return fmt.Errorf("Worker heartbeat, lease, reaper and dispatch limits are invalid")
 	}
 	if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
 		return fmt.Errorf("WORKLOAD_HTTP_ADDR must be host:port: %w", err)

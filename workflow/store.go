@@ -13,7 +13,7 @@ var (
 	ErrAtomicReplaceUnsupported = errors.New("atomic file replacement is unsupported on this platform")
 )
 
-// RunStore provides the minimum create and load operations shared by persistence implementations.
+// RunStore 定义各持久化实现共享的最小创建和加载操作。
 type RunStore interface {
 	// Create 持久化新 Run，存在相同 RunID 时返回 ErrRunExists。
 	Create(context.Context, RunSnapshot) error
@@ -21,7 +21,7 @@ type RunStore interface {
 	Load(context.Context, RunID) (RunSnapshot, error)
 }
 
-// Store preserves the module 1 full-snapshot persistence contract.
+// Store 保留模块 1 的完整快照持久化契约。
 type Store interface {
 	RunStore
 	// Save 原子更新已有 Run，不存在时返回 ErrRunNotFound。

@@ -48,7 +48,7 @@ func TestControlPlaneCreatesVersionAndIdempotentRun(t *testing.T) {
 	}
 	coordinator := startTestCoordinator(t, ctx, repository, engine)
 	defer closeTestCoordinator(t, coordinator)
-	runs, err := app.NewRunService(repository, definitionService, engine, coordinator.Enqueue, func() (workflow.RunID, error) { return runID, nil })
+	runs, err := app.NewRunService(repository, definitionService, coordinator, func() (workflow.RunID, error) { return runID, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestControlPlaneCancelsRunningRun(t *testing.T) {
 	}
 	coordinator := startTestCoordinator(t, ctx, repository, engine)
 	defer closeTestCoordinator(t, coordinator)
-	runs, err := app.NewRunService(repository, definitions, engine, coordinator.Enqueue, func() (workflow.RunID, error) {
+	runs, err := app.NewRunService(repository, definitions, coordinator, func() (workflow.RunID, error) {
 		return workflow.RunID("cancel-run-" + fmt.Sprint(time.Now().UnixNano())), nil
 	})
 	if err != nil {
@@ -218,7 +218,7 @@ func TestControlPlanePersistsRetryAndTimeoutAttempts(t *testing.T) {
 	}
 	coordinator := startTestCoordinator(t, ctx, repository, engine)
 	defer closeTestCoordinator(t, coordinator)
-	runs, err := app.NewRunService(repository, definitions, engine, coordinator.Enqueue, nil)
+	runs, err := app.NewRunService(repository, definitions, coordinator, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestCommittedPendingRunIsFoundAndResumedAfterEnqueueGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runs, err := app.NewRunService(repository, definitions, engine, func(workflow.RunID) {}, nil)
+	runs, err := app.NewRunService(repository, definitions, noopRunController{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,6 +308,12 @@ func TestCommittedPendingRunIsFoundAndResumedAfterEnqueueGap(t *testing.T) {
 	}
 	waitForRepositoryRunStatus(t, ctx, repository, response.RunID, workflow.WorkflowSucceeded)
 }
+
+type noopRunController struct{}
+
+func (noopRunController) Wake() {}
+
+func (noopRunController) Cancel(context.Context, workflow.RunID) error { return nil }
 
 func startTestCoordinator(t *testing.T, ctx context.Context, repository *postgres.Repository, engine *workflow.Engine) *runtimecoord.Coordinator {
 	t.Helper()

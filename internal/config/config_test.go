@@ -7,10 +7,11 @@ import (
 
 func TestLoadRequiresDatabaseAndDistinctTokens(t *testing.T) {
 	base := map[string]string{
-		"DATABASE_URL":            "postgres://localhost/workload",
-		"WORKLOAD_HTTP_ADDR":      ":8080",
-		"WORKLOAD_VIEWER_TOKEN":   "viewer-secret",
-		"WORKLOAD_OPERATOR_TOKEN": "operator-secret",
+		"DATABASE_URL":                    "postgres://localhost/workload",
+		"WORKLOAD_HTTP_ADDR":              ":8080",
+		"WORKLOAD_VIEWER_TOKEN":           "viewer-secret",
+		"WORKLOAD_OPERATOR_TOKEN":         "operator-secret",
+		"WORKLOAD_WORKER_BOOTSTRAP_TOKEN": "worker-bootstrap-secret",
 	}
 	lookup := func(values map[string]string) func(string) string {
 		return func(key string) string { return values[key] }
@@ -24,6 +25,11 @@ func TestLoadRequiresDatabaseAndDistinctTokens(t *testing.T) {
 	if _, err := Load(lookup(duplicate)); err == nil {
 		t.Fatal("Load() error = nil, want duplicate token error")
 	}
+	missingBootstrap := clone(base)
+	missingBootstrap["WORKLOAD_WORKER_BOOTSTRAP_TOKEN"] = ""
+	if _, err := Load(lookup(missingBootstrap)); err == nil {
+		t.Fatal("Load() error = nil, want missing Worker bootstrap token error")
+	}
 	config, err := Load(lookup(base))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -33,12 +39,61 @@ func TestLoadRequiresDatabaseAndDistinctTokens(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresWorkerBootstrapTokenToDifferFromUserTokens(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL": "postgres://localhost/workload", "WORKLOAD_HTTP_ADDR": ":8080",
+		"WORKLOAD_VIEWER_TOKEN": "viewer-secret", "WORKLOAD_OPERATOR_TOKEN": "operator-secret",
+		"WORKLOAD_WORKER_BOOTSTRAP_TOKEN": "worker-bootstrap-secret",
+	}
+	lookup := func(values map[string]string) func(string) string {
+		return func(key string) string { return values[key] }
+	}
+	for _, value := range []string{"viewer-secret", "operator-secret"} {
+		invalid := clone(base)
+		invalid["WORKLOAD_WORKER_BOOTSTRAP_TOKEN"] = value
+		if _, err := Load(lookup(invalid)); err == nil {
+			t.Fatalf("Load() accepted Worker bootstrap token equal to %q", value)
+		}
+	}
+}
+
+func TestLoadValidatesDistributedExecutionIntervalsAndLimit(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL": "postgres://localhost/workload", "WORKLOAD_HTTP_ADDR": ":8080",
+		"WORKLOAD_VIEWER_TOKEN": "viewer-secret", "WORKLOAD_OPERATOR_TOKEN": "operator-secret",
+		"WORKLOAD_WORKER_BOOTSTRAP_TOKEN": "worker-bootstrap-secret",
+	}
+	lookup := func(values map[string]string) func(string) string {
+		return func(key string) string { return values[key] }
+	}
+	valid := clone(base)
+	valid["WORKLOAD_HEARTBEAT_INTERVAL"] = "5s"
+	valid["WORKLOAD_LEASE_TTL"] = "15s"
+	valid["WORKLOAD_LEASE_REAPER_INTERVAL"] = "1s"
+	valid["WORKLOAD_DISPATCH_LIMIT"] = "100"
+	if config, err := Load(lookup(valid)); err != nil || config.LeaseDuration != 15*time.Second || config.DispatchLimit != 100 {
+		t.Fatalf("Load() = %+v, %v", config, err)
+	}
+	for _, mutation := range []func(map[string]string){
+		func(values map[string]string) { values["WORKLOAD_LEASE_TTL"] = "5s" },
+		func(values map[string]string) { values["WORKLOAD_DISPATCH_LIMIT"] = "0" },
+		func(values map[string]string) { values["WORKLOAD_HEARTBEAT_INTERVAL"] = "invalid" },
+	} {
+		invalid := clone(valid)
+		mutation(invalid)
+		if _, err := Load(lookup(invalid)); err == nil {
+			t.Fatal("Load() accepted invalid distributed execution configuration")
+		}
+	}
+}
+
 func TestLoadMockExecutionDelay(t *testing.T) {
 	base := map[string]string{
-		"DATABASE_URL":            "postgres://localhost/workload",
-		"WORKLOAD_HTTP_ADDR":      ":8080",
-		"WORKLOAD_VIEWER_TOKEN":   "viewer-secret",
-		"WORKLOAD_OPERATOR_TOKEN": "operator-secret",
+		"DATABASE_URL":                    "postgres://localhost/workload",
+		"WORKLOAD_HTTP_ADDR":              ":8080",
+		"WORKLOAD_VIEWER_TOKEN":           "viewer-secret",
+		"WORKLOAD_OPERATOR_TOKEN":         "operator-secret",
+		"WORKLOAD_WORKER_BOOTSTRAP_TOKEN": "worker-bootstrap-secret",
 	}
 	lookup := func(values map[string]string) func(string) string {
 		return func(key string) string { return values[key] }
