@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -13,7 +11,6 @@ import (
 	"time"
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/config"
-	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
 
 func TestMigrateRequiresDatabaseURL(t *testing.T) {
@@ -36,32 +33,6 @@ func TestNewLoggerUsesConfiguredFormatAndLevel(t *testing.T) {
 	}
 	if strings.Contains(got, "production-secret") || !strings.Contains(got, "<redacted>") {
 		t.Fatalf("logger leaked secret: %q", got)
-	}
-}
-
-func TestDefaultExecutorReturnsDeterministicSuccess(t *testing.T) {
-	var logs bytes.Buffer
-	response := newDefaultExecutor(0, slog.New(slog.NewTextHandler(&logs, nil))).Execute(context.Background(), workflow.ExecutionRequest{
-		DefinitionID: "demo",
-		RunID:        "run-one",
-		TaskKey:      "one",
-		Action:       "secret-action",
-		Attempt:      1,
-	})
-	if response.Kind != workflow.ResultSuccess {
-		t.Fatalf("default executor response = %+v, want success", response)
-	}
-	if got := logs.String(); !strings.Contains(got, "run-one") || !strings.Contains(got, "one") || strings.Contains(got, "secret-action") {
-		t.Fatalf("executor logs = %q, want identifiers without Action", got)
-	}
-}
-
-func TestSuccessExecutorDelayStopsOnContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	got := newDefaultExecutor(time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil))).Execute(ctx, workflow.ExecutionRequest{})
-	if got.Kind != workflow.ResultCanceled {
-		t.Fatalf("result = %+v, want canceled", got)
 	}
 }
 

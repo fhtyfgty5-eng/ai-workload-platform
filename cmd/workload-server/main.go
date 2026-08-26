@@ -20,7 +20,6 @@ import (
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerapi"
-	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
 
 func main() {
@@ -196,36 +195,4 @@ func superviseServer(ctx context.Context, server lifecycleHTTPServer, coordinato
 
 func newLogger(cfg config.Config, output io.Writer) (*slog.Logger, error) {
 	return observability.NewLogger(output, cfg.LogFormat, cfg.LogLevel)
-}
-
-// successExecutor 是模块 2 的安全演示执行器：只等待固定时长，不解释或运行 Action。
-type successExecutor struct {
-	delay  time.Duration
-	logger *slog.Logger
-}
-
-func newDefaultExecutor(delay time.Duration, logger *slog.Logger) workflow.Executor {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return successExecutor{delay: delay, logger: logger}
-}
-
-func (e successExecutor) Execute(ctx context.Context, request workflow.ExecutionRequest) workflow.ExecutionResponse {
-	if e.delay > 0 {
-		timer := time.NewTimer(e.delay)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return workflow.ExecutionResponse{Kind: workflow.ResultCanceled}
-		case <-timer.C:
-		}
-	}
-	e.logger.Info("mock attempt completed",
-		"workflow_id", request.DefinitionID,
-		"run_id", request.RunID,
-		"task_key", request.TaskKey,
-		"attempt_number", request.Attempt,
-	)
-	return workflow.ExecutionResponse{Kind: workflow.ResultSuccess, Output: "mock-completed:" + request.Action}
 }

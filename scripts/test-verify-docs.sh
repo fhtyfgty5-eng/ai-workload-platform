@@ -39,6 +39,21 @@ expect_failure() {
   fi
 }
 
+expect_missing_required_file() {
+  local name=$1
+  local relative_path=$2
+  local output
+  if output=$("$VERIFY" "$FIXTURE" 2>&1); then
+    printf 'FAIL %s: expected missing required file\n' "$name" >&2
+    exit 1
+  fi
+  if [[ "$output" != *"missing required file: $relative_path"* ]]; then
+    printf 'FAIL %s: failure did not identify required file %s\n' "$name" "$relative_path" >&2
+    exit 1
+  fi
+  printf 'PASS %s\n' "$name"
+}
+
 prepare_fixture
 expect_success baseline
 
@@ -52,6 +67,10 @@ expect_failure missing_current_module_design
 prepare_fixture
 rm "$FIXTURE/docs/学习/文章/模块1-单机可靠工作流内核设计与验证基础.md"
 expect_failure missing_current_module_learning_article
+
+prepare_fixture
+rm "$FIXTURE/docs/实验/模块4验证报告.md"
+expect_missing_required_file missing_completed_module_report "docs/实验/模块4验证报告.md"
 
 prepare_fixture
 printf '\n[坏链接](docs/不存在.md)\n' >> "$FIXTURE/README.md"
@@ -69,4 +88,4 @@ prepare_fixture
 printf '未跟踪文档包含尾随空白  \n' > "$FIXTURE/docs/未跟踪文档.md"
 expect_failure untracked_markdown_trailing_whitespace
 
-printf '8/8 scenarios passed\n'
+printf '9/9 scenarios passed\n'
