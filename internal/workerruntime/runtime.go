@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerclient"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
@@ -42,6 +44,10 @@ type Options struct {
 	ShutdownTimeout time.Duration
 	// Random 注入 [0,1] 随机数源，用于轮询抖动并支持确定性测试。
 	Random func() float64
+	// Metrics 可选；为空时不改变既有运行循环。
+	Metrics *observability.Metrics
+	// Logger 可选；只记录非敏感生命周期信息。
+	Logger *slog.Logger
 }
 
 // Runtime 组合控制面客户端、执行器和运行策略，管理一个 Worker 会话的完整生命周期。
@@ -87,13 +93,18 @@ func New(client Client, executor workflow.Executor, options Options) (*Runtime, 
 	if options.Random == nil {
 		options.Random = func() float64 { return 0.5 }
 	}
+	if options.Logger == nil {
+		options.Logger = slog.Default()
+	}
 	return &Runtime{client: client, executor: executor, options: options}, nil
 }
 
 // Run 注册一个会话并持续领取和执行任务；父 Context 取消后先 drain，
 // 再在关闭期限内等待或停止剩余本地任务。
 func (r *Runtime) Run(ctx context.Context) error {
+	startedAt := time.Now()
 	registration, err := r.client.Register(ctx, r.options.BootstrapToken, r.options.Registration)
+	r.observe("worker_register", startedAt, err)
 	if err != nil {
 		return err
 	}
@@ -126,7 +137,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	for ctx.Err() == nil && runCtx.Err() == nil {
 		slots := r.options.Registration.MaxConcurrency - state.count()
 		if slots > 0 {
+			startedAt := time.Now()
 			response, claimErr := r.client.Claim(pollCtx, registration.WorkerID, registration.SessionToken, slots)
+			r.observe("claim", startedAt, claimErr)
 			if isPermanentSessionError(claimErr) {
 				sessionErr = fmt.Errorf("claim tasks for Worker session: %w", claimErr)
 				stopPolling()
@@ -171,7 +184,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	// 完成 drain 请求并等待已经领取的任务。
 	drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), r.options.ShutdownTimeout)
 	defer cancelDrain()
+	drainStartedAt := time.Now()
 	drainSummary, drainErr := r.client.Drain(drainCtx, registration.WorkerID, registration.SessionToken)
+	r.observe("worker_drain", drainStartedAt, drainErr)
 
 	// draining Worker 可以完成已有租约但不能领取新任务；在任务完成或
 	// 关闭期限到达前必须保持心跳循环运行。
@@ -191,7 +206,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	if drainSummary.Status != workerprotocol.WorkerStopped && drainCtx.Err() == nil {
 		// 第一次调用把仍有活动租约的会话改为 draining；租约清空后第二次调用
 		// 才把会话推进到 stopped 并记录 stopped_at。
+		finalDrainStartedAt := time.Now()
 		_, finalDrainErr := r.client.Drain(drainCtx, registration.WorkerID, registration.SessionToken)
+		r.observe("worker_drain", finalDrainStartedAt, finalDrainErr)
 		switch {
 		case finalDrainErr == nil:
 			drainErr = nil
@@ -217,6 +234,13 @@ func (r *Runtime) startLease(runCtx context.Context, workerID, sessionToken stri
 	go func() {
 		defer state.remove(lease.DispatchID)
 		defer cancel()
+		startedAt := time.Now()
+		fields := observability.LogFields{
+			RunID: string(lease.RunID), TaskKey: string(lease.TaskKey), Attempt: lease.Attempt,
+			WorkerID: workerID, DispatchID: lease.DispatchID, Operation: "worker_execute",
+		}
+		logger := observability.LoggerFromContext(observability.WithFields(leaseCtx, fields), r.options.Logger)
+		logger.Debug("worker lease execution started")
 		go r.enforceLocalSafetyDeadline(leaseCtx, active)
 		response := r.executor.Execute(leaseCtx, workflow.ExecutionRequest{
 			DefinitionID: lease.DefinitionID,
@@ -227,10 +251,15 @@ func (r *Runtime) startLease(runCtx context.Context, workerID, sessionToken stri
 			Attempt:      lease.Attempt,
 		})
 		if leaseCtx.Err() != nil || response.Kind == workflow.ResultCanceled {
+			logger.Debug("worker lease execution stopped", "result_kind", response.Kind, "duration_ms", time.Since(startedAt).Milliseconds())
 			return
 		}
 		request := workerprotocol.CompleteRequest{LeaseToken: lease.LeaseToken, Result: response}
-		_ = r.submitWithRetry(leaseCtx, workerID, lease.DispatchID, sessionToken, request)
+		if err := r.submitWithRetry(leaseCtx, workerID, lease.DispatchID, sessionToken, request); err != nil {
+			logger.Warn("worker lease completion failed", "result_kind", response.Kind, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err)
+			return
+		}
+		logger.Debug("worker lease execution completed", "result_kind", response.Kind, "duration_ms", time.Since(startedAt).Milliseconds())
 	}()
 }
 
@@ -283,7 +312,9 @@ func localSafetyDelay(lease workerprotocol.Lease, margin time.Duration) time.Dur
 // submitWithRetry 只重试可能恢复的传输或服务错误；所有权丢失和结果冲突必须立即停止。
 func (r *Runtime) submitWithRetry(ctx context.Context, workerID, dispatchID, sessionToken string, request workerprotocol.CompleteRequest) error {
 	for ctx.Err() == nil {
+		startedAt := time.Now()
 		_, err := r.client.Complete(ctx, workerID, dispatchID, sessionToken, request)
+		r.observe("complete", startedAt, err)
 		if err == nil {
 			return nil
 		}
@@ -308,7 +339,9 @@ func (r *Runtime) heartbeatLoop(ctx context.Context, workerID, sessionToken stri
 			return nil
 		case <-ticker.C:
 			leases := state.refs()
+			startedAt := time.Now()
 			response, err := r.client.Heartbeat(ctx, workerID, sessionToken, workerprotocol.HeartbeatRequest{Leases: leases})
+			r.observe("heartbeat", startedAt, err)
 			if err != nil {
 				if isPermanentSessionError(err) {
 					return fmt.Errorf("heartbeat Worker session: %w", err)
@@ -323,6 +356,22 @@ func (r *Runtime) heartbeatLoop(ctx context.Context, workerID, sessionToken stri
 				}
 			}
 		}
+	}
+}
+
+// observe 记录 Worker 本地协议调用的低基数结果；指标和日志故障不得影响租约流程。
+func (r *Runtime) observe(operation string, startedAt time.Time, err error) {
+	outcome := "success"
+	errorCode := ""
+	if err != nil {
+		outcome = "error"
+		errorCode = workerclient.ErrorCode(err)
+	}
+	if r.options.Metrics != nil {
+		r.options.Metrics.ObserveOperation(operation, outcome, errorCode, time.Since(startedAt))
+	}
+	if err != nil {
+		r.options.Logger.Warn("worker operation failed", "operation", operation, "duration_ms", time.Since(startedAt).Milliseconds(), "error_code", errorCode)
 	}
 }
 

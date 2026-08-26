@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerclient"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerconfig"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
@@ -24,7 +25,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	client, err := workerclient.New(workerclient.Config{BaseURL: cfg.ServerURL, Logger: slog.Default()})
+	logger, err := observability.NewLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	closeTracer, err := newWorkerTracer(cfg, os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer closeTracer(context.Background())
+	client, err := workerclient.New(workerclient.Config{BaseURL: cfg.ServerURL, Logger: logger})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -37,6 +49,7 @@ func main() {
 		},
 		PollMin: cfg.PollMin, PollMax: cfg.PollMax, HeartbeatInterval: cfg.HeartbeatInterval,
 		RetryInterval: 250 * time.Millisecond, SafetyMargin: time.Second, ShutdownTimeout: cfg.ShutdownTimeout,
+		Logger: logger,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -46,6 +59,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newWorkerTracer(cfg workerconfig.Config, output io.Writer) (func(context.Context) error, error) {
+	_, closeTracer, err := observability.NewTracerProvider(observability.TracingConfig{
+		Mode: cfg.TracingMode, ServiceName: cfg.TracingServiceName, Writer: output,
+	})
+	return closeTracer, err
 }
 
 // mockExecutor 刻意保持封闭：Action 只是标签，绝不能被解释为 Shell 命令、

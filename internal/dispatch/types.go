@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
@@ -37,6 +38,10 @@ type LockAcquirer func(context.Context) (Lock, error)
 
 // CoordinatorOptions 控制扫描频率、锁健康检查和单轮分发规模。
 type CoordinatorOptions struct {
+	// Metrics 可选；为空时不记录指标，避免改变旧调用方行为。
+	Metrics *observability.Metrics
+	// ObserveMetrics 在每轮扫描后刷新数据库聚合 Gauge；回调错误不会阻断调度。
+	ObserveMetrics func(context.Context)
 	// ScanInterval 是无唤醒信号时重新扫描数据库的最长等待时间。
 	ScanInterval time.Duration
 	// LockCheckInterval 和 LockCheckTimeout 控制协调锁的周期健康检查。

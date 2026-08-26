@@ -14,12 +14,16 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/app"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/auth"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerapi"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
+	"go.opentelemetry.io/otel"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const defaultBodyLimit int64 = 1 << 20
@@ -34,6 +38,8 @@ type Dependencies struct {
 	Ready         func() bool
 	MaxBodyBytes  int64
 	Logger        *slog.Logger
+	Metrics       *observability.Metrics
+	Tracer        oteltrace.Tracer
 }
 
 // WorkerHandler 使共享 HTTP 中间件不依赖 Worker 的具体存储实现。
@@ -47,6 +53,7 @@ type WorkerHandler interface {
 // 以保证公开文档与实际路由注册保持一致。
 func Routes() []string {
 	routes := []string{
+		"/metrics",
 		"/api/v1/workflows",
 		"/api/v1/workflows/{workflow-id}",
 		"/api/v1/workflows/{workflow-id}/versions",
@@ -74,18 +81,35 @@ func NewHandler(deps Dependencies) http.Handler {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
+	if deps.Tracer == nil {
+		deps.Tracer = otel.Tracer("workload-server")
+	}
 	authenticator, authErr := auth.NewAuthenticator(deps.ViewerToken, deps.OperatorToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		traceCtx := observability.ExtractHTTP(r.Context(), r)
+		traceCtx, span := observability.StartSpan(traceCtx, deps.Tracer, r.Method+" "+normalizedPath(r.URL.Path))
+		defer span.End()
+		r = r.WithContext(traceCtx)
+		requestLogger := observability.LoggerFromContext(traceCtx, deps.Logger)
 		requestID := requestID(r)
 		routePath := normalizedPath(r.URL.Path)
 		w.Header().Set("X-Request-ID", requestID)
 		logged := &loggingResponseWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
+			outcome := "success"
+			if logged.status >= http.StatusBadRequest {
+				outcome = "error"
+			}
+			observability.FinishSpan(span, outcome, logged.errorCode)
+			if deps.Metrics != nil {
+				deps.Metrics.ObserveHTTP(r.Method, routePath, logged.status, time.Since(startedAt))
+			}
 			attributes := []any{"request_id", requestID, "method", r.Method, "path", routePath, "status", logged.status}
 			if logged.errorCode != "" {
 				attributes = append(attributes, "error_code", logged.errorCode)
 			}
-			deps.Logger.Info("http request", attributes...)
+			requestLogger.Info("http request", attributes...)
 		}()
 		w = logged
 		if r.URL.Path == "/health/live" {
@@ -119,6 +143,18 @@ func NewHandler(deps Dependencies) http.Handler {
 			writeAPIError(w, requestID, http.StatusUnauthorized, "unauthorized", "authentication required")
 			return
 		}
+		if r.URL.Path == "/metrics" {
+			if r.Method != http.MethodGet {
+				writeAPIError(w, requestID, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+				return
+			}
+			if deps.Metrics == nil {
+				writeAPIError(w, requestID, http.StatusNotFound, "not_found", "metrics are disabled")
+				return
+			}
+			observability.MetricsHandler(deps.Metrics).ServeHTTP(w, r)
+			return
+		}
 		if deps.Workers != nil && deps.Workers.Matches(r.URL.Path) {
 			handleWorkerRequest(w, r, deps, requestID, routePath)
 			return
@@ -127,7 +163,7 @@ func NewHandler(deps Dependencies) http.Handler {
 			status, code, message := mappedError(err)
 			if status == http.StatusInternalServerError {
 				// 只记录服务端诊断，不记录请求 Header、Body 或配置中的凭据。
-				deps.Logger.Error("http request failed", "request_id", requestID, "method", r.Method, "path", routePath, "error_code", code, "error", err)
+				requestLogger.Error("http request failed", "request_id", requestID, "method", r.Method, "path", routePath, "error_code", code, "error", err)
 			}
 			writeAPIError(w, requestID, status, code, message)
 		}
@@ -141,7 +177,7 @@ func handleWorkerRequest(w http.ResponseWriter, r *http.Request, deps Dependenci
 	}
 	if apiErr.Status == http.StatusInternalServerError {
 		// Worker 错误沿用控制面错误的规则，只记录非敏感元数据。
-		deps.Logger.Error("http request failed", "request_id", requestID, "method", r.Method, "path", routePath, "error_code", apiErr.Code, "error", apiErr)
+		observability.LoggerFromContext(r.Context(), deps.Logger).Error("http request failed", "request_id", requestID, "method", r.Method, "path", routePath, "error_code", apiErr.Code, "error", apiErr)
 	}
 	writeAPIError(w, requestID, apiErr.Status, apiErr.Code, apiErr.Message)
 }
@@ -384,7 +420,7 @@ func dispatch(ctx context.Context, w http.ResponseWriter, r *http.Request, deps 
 
 // normalizedPath 把具体资源 ID 替换为公开路由模板，避免日志字段出现无界基数。
 func normalizedPath(path string) string {
-	if path == "/health/live" || path == "/health/ready" {
+	if path == "/health/live" || path == "/health/ready" || path == "/metrics" {
 		return path
 	}
 	parts := splitPath(path)

@@ -151,24 +151,48 @@ func (c *DispatchCoordinator) scanLoop(ctx context.Context) {
 			}
 			return
 		}
+		cycleStart := time.Now()
 		if _, err := c.store.ReapExpired(ctx, c.options.BatchSize); err != nil {
+			if c.options.Metrics != nil {
+				duration := time.Since(cycleStart)
+				c.options.Metrics.ObserveOperation("lease_reap", "error", "database_unavailable", duration)
+				c.options.Metrics.ObserveLeaseReclaim(duration)
+			}
 			if ctx.Err() == nil {
 				c.fail(fmt.Errorf("reap expired task leases: %w", err))
 			}
 			return
 		}
+		if c.options.Metrics != nil {
+			duration := time.Since(cycleStart)
+			c.options.Metrics.ObserveOperation("lease_reap", "success", "", duration)
+			c.options.Metrics.ObserveLeaseReclaim(duration)
+		}
+		scheduleStart := time.Now()
 		created, err := c.store.CreateDispatches(ctx, c.options.BatchSize)
 		if err != nil {
+			if c.options.Metrics != nil {
+				c.options.Metrics.ObserveOperation("dispatch_schedule", "error", "database_unavailable", time.Since(scheduleStart))
+			}
 			if ctx.Err() == nil {
 				c.fail(fmt.Errorf("create task dispatches: %w", err))
 			}
 			return
 		}
+		if c.options.Metrics != nil {
+			c.options.Metrics.ObserveOperation("dispatch_schedule", "success", "", time.Since(scheduleStart))
+		}
 		// CreateDispatches 每轮最多推进每个 Run 的一个任务以保持公平。
 		// 只要一轮公平扫描仍有进展就立即继续，使少量大 Run 也能填满 Worker 容量，
 		// 不必让每个任务都等待下一次周期扫描。
 		if created > 0 {
+			if c.options.ObserveMetrics != nil {
+				c.options.ObserveMetrics(ctx)
+			}
 			continue
+		}
+		if c.options.ObserveMetrics != nil {
+			c.options.ObserveMetrics(ctx)
 		}
 		select {
 		case <-ctx.Done():

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -16,8 +17,11 @@ import (
 	"time"
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/auth"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
+	"go.opentelemetry.io/otel"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -45,6 +49,9 @@ type Options struct {
 	LeaseDuration     time.Duration
 	MaxBodyBytes      int64
 	Wake              func()
+	Metrics           *observability.Metrics
+	Tracer            oteltrace.Tracer
+	Logger            *slog.Logger
 }
 
 // APIError 保存稳定的公开错误分类，以及外层 HTTP Handler 生成的 request ID。
@@ -72,6 +79,9 @@ type Server struct {
 	leaseDuration     time.Duration
 	maxBodyBytes      int64
 	wake              func()
+	metrics           *observability.Metrics
+	tracer            oteltrace.Tracer
+	logger            *slog.Logger
 }
 
 func New(store Store, options Options) (*Server, error) {
@@ -90,6 +100,12 @@ func New(store Store, options Options) (*Server, error) {
 	if options.Wake == nil {
 		options.Wake = func() {}
 	}
+	if options.Tracer == nil {
+		options.Tracer = otel.Tracer("workload-worker-api")
+	}
+	if options.Logger == nil {
+		options.Logger = slog.Default()
+	}
 	return &Server{
 		store:             store,
 		bootstrapToken:    options.BootstrapToken,
@@ -97,6 +113,9 @@ func New(store Store, options Options) (*Server, error) {
 		leaseDuration:     options.LeaseDuration,
 		maxBodyBytes:      options.MaxBodyBytes,
 		wake:              options.Wake,
+		metrics:           options.Metrics,
+		tracer:            options.Tracer,
+		logger:            options.Logger,
 	}, nil
 }
 
@@ -147,7 +166,15 @@ func (s *Server) Handle(w http.ResponseWriter, r *http.Request, requestID string
 		if err := s.decodeJSON(w, r, &request, true); err != nil {
 			return apiError(requestID, http.StatusBadRequest, "invalid_request", err.Error(), err)
 		}
-		registration, err := s.store.RegisterWorker(r.Context(), request)
+		startedAt := time.Now()
+		operationCtx, span := observability.StartSpan(r.Context(), s.tracer, "worker.register")
+		registration, err := s.store.RegisterWorker(operationCtx, request)
+		finishOperationSpan(span, err)
+		fields := observability.LogFields{RequestID: requestID, Operation: "worker_register"}
+		if err == nil {
+			fields.WorkerID = registration.Summary.WorkerID
+		}
+		s.observe(operationCtx, fields, startedAt, err)
 		if err != nil {
 			return mapError(requestID, err)
 		}
@@ -228,7 +255,11 @@ func (s *Server) Handle(w http.ResponseWriter, r *http.Request, requestID string
 		if err := s.decodeJSON(w, r, &request, true); err != nil {
 			return apiError(requestID, http.StatusBadRequest, "invalid_request", err.Error(), err)
 		}
-		leases, err := s.store.Claim(r.Context(), workerID, request.Slots)
+		startedAt := time.Now()
+		operationCtx, span := observability.StartSpan(r.Context(), s.tracer, "worker.claim")
+		leases, err := s.store.Claim(operationCtx, workerID, request.Slots)
+		finishOperationSpan(span, err)
+		s.observe(operationCtx, observability.LogFields{RequestID: requestID, WorkerID: workerID, Operation: "claim"}, startedAt, err)
 		if err != nil {
 			return mapError(requestID, err)
 		}
@@ -241,7 +272,11 @@ func (s *Server) Handle(w http.ResponseWriter, r *http.Request, requestID string
 		if err := s.decodeJSON(w, r, &request, true); err != nil {
 			return apiError(requestID, http.StatusBadRequest, "invalid_request", err.Error(), err)
 		}
-		response, err := s.store.Heartbeat(r.Context(), workerID, request.Leases)
+		startedAt := time.Now()
+		operationCtx, span := observability.StartSpan(r.Context(), s.tracer, "worker.heartbeat")
+		response, err := s.store.Heartbeat(operationCtx, workerID, request.Leases)
+		finishOperationSpan(span, err)
+		s.observe(operationCtx, observability.LogFields{RequestID: requestID, WorkerID: workerID, Operation: "heartbeat"}, startedAt, err)
 		if err != nil {
 			return mapError(requestID, err)
 		}
@@ -254,7 +289,11 @@ func (s *Server) Handle(w http.ResponseWriter, r *http.Request, requestID string
 		if err := s.decodeJSON(w, r, &request, true); err != nil {
 			return apiError(requestID, http.StatusBadRequest, "invalid_request", err.Error(), err)
 		}
-		response, err := s.store.Complete(r.Context(), workerID, dispatchID, request)
+		startedAt := time.Now()
+		operationCtx, span := observability.StartSpan(r.Context(), s.tracer, "worker.complete")
+		response, err := s.store.Complete(operationCtx, workerID, dispatchID, request)
+		finishOperationSpan(span, err)
+		s.observe(operationCtx, observability.LogFields{RequestID: requestID, WorkerID: workerID, DispatchID: dispatchID, Operation: "complete"}, startedAt, err)
 		if err != nil {
 			return mapError(requestID, err)
 		}
@@ -265,13 +304,54 @@ func (s *Server) Handle(w http.ResponseWriter, r *http.Request, requestID string
 		if err := s.decodeJSON(w, r, &struct{}{}, false); err != nil {
 			return apiError(requestID, http.StatusBadRequest, "invalid_request", err.Error(), err)
 		}
-		response, err := s.store.DrainWorker(r.Context(), workerID)
+		startedAt := time.Now()
+		operationCtx, span := observability.StartSpan(r.Context(), s.tracer, "worker.drain")
+		response, err := s.store.DrainWorker(operationCtx, workerID)
+		finishOperationSpan(span, err)
+		s.observe(operationCtx, observability.LogFields{RequestID: requestID, WorkerID: workerID, Operation: "worker_drain"}, startedAt, err)
 		if err != nil {
 			return mapError(requestID, err)
 		}
 		writeJSON(w, http.StatusOK, response)
 	}
 	return nil
+}
+
+func finishOperationSpan(span oteltrace.Span, err error) {
+	outcome := "success"
+	errorCode := ""
+	if err != nil {
+		outcome = "error"
+		errorCode = workerOperationErrorCode(err)
+	}
+	observability.FinishSpan(span, outcome, errorCode)
+	span.End()
+}
+
+// observe 只记录低基数操作结果；观测失败不会改变 Worker API 的返回值。
+func (s *Server) observe(ctx context.Context, fields observability.LogFields, startedAt time.Time, err error) {
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+		fields.ErrorCode = workerOperationErrorCode(err)
+	}
+	fields.Duration = time.Since(startedAt).Milliseconds()
+	if s.metrics != nil {
+		s.metrics.ObserveOperation(fields.Operation, outcome, fields.ErrorCode, time.Since(startedAt))
+	}
+	logger := observability.LoggerFromContext(observability.WithFields(ctx, fields), s.logger)
+	if err != nil {
+		logger.Warn("worker operation failed", "error", err)
+	} else {
+		logger.Debug("worker operation completed")
+	}
+}
+
+func workerOperationErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	return observability.NormalizeErrorCode(mapError("", err).Code)
 }
 
 type workerPage struct {

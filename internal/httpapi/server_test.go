@@ -16,6 +16,7 @@ import (
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerapi"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestHandlerSeparatesWorkerAndControlPlaneAuthentication(t *testing.T) {
@@ -111,6 +112,28 @@ func TestHandlerHealthDoesNotRequireToken(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("live status = %d, want 200", recorder.Code)
+	}
+}
+
+func TestNormalizedPathPreservesMetricsRoute(t *testing.T) {
+	if got := normalizedPath("/metrics"); got != "/metrics" {
+		t.Fatalf("normalizedPath(/metrics) = %q, want /metrics", got)
+	}
+}
+
+func TestHandlerAddsTraceIdentityToRequestLog(t *testing.T) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+	var output bytes.Buffer
+	handler := NewHandler(Dependencies{
+		Ready:  func() bool { return true },
+		Logger: slog.New(slog.NewTextHandler(&output, nil)),
+		Tracer: provider.Tracer("httpapi-test"),
+	})
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health/live", nil))
+	got := output.String()
+	if !strings.Contains(got, "trace_id=") || !strings.Contains(got, "span_id=") {
+		t.Fatalf("request log = %q, want trace_id and span_id", got)
 	}
 }
 

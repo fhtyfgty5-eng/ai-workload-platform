@@ -130,6 +130,36 @@ func TestConfigRejectsInvalidHTTPAddress(t *testing.T) {
 	}
 }
 
+func TestLoadObservabilityDefaultsAndValidation(t *testing.T) {
+	env := map[string]string{
+		"DATABASE_URL":                    "postgres://localhost/workload",
+		"WORKLOAD_HTTP_ADDR":              ":8080",
+		"WORKLOAD_VIEWER_TOKEN":           "viewer-secret",
+		"WORKLOAD_OPERATOR_TOKEN":         "operator-secret",
+		"WORKLOAD_WORKER_BOOTSTRAP_TOKEN": "worker-bootstrap-secret",
+	}
+	cfg, err := Load(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.TracingMode != "off" || cfg.TracingServiceName != "workload-server" {
+		t.Fatalf("observability defaults = mode %q service %q", cfg.TracingMode, cfg.TracingServiceName)
+	}
+	if cfg.AlertWebhookURL != "" || cfg.AlertWebhookTimeout != time.Second {
+		t.Fatalf("alert defaults = url %q timeout %s", cfg.AlertWebhookURL, cfg.AlertWebhookTimeout)
+	}
+
+	env["WORKLOAD_TRACING_MODE"] = "invalid"
+	if _, err := Load(func(key string) string { return env[key] }); err == nil {
+		t.Fatal("Load() accepted invalid tracing mode")
+	}
+	env["WORKLOAD_TRACING_MODE"] = "stdout"
+	env["WORKLOAD_ALERT_WEBHOOK_URL"] = "file:///tmp/webhook"
+	if _, err := Load(func(key string) string { return env[key] }); err == nil {
+		t.Fatal("Load() accepted non-HTTP webhook URL")
+	}
+}
+
 func clone(values map[string]string) map[string]string {
 	copy := make(map[string]string, len(values))
 	for key, value := range values {

@@ -27,14 +27,24 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	// MockExecutionDelay 只用于演示和故障测试，不代表真实任务耗时。
 	MockExecutionDelay time.Duration
+	// TracingMode 控制独立 Worker 的 Span 导出；TracingServiceName 标识导出来源。
+	TracingMode        string
+	TracingServiceName string
+	// LogLevel 和 LogFormat 与控制面使用同一组环境变量，保证跨进程日志契约一致。
+	LogLevel  string
+	LogFormat string
 }
 
 // Load 从指定环境变量读取器加载配置，补齐默认值后执行完整校验。
 func Load(getenv func(string) string) (Config, error) {
 	config := Config{
-		ServerURL:      strings.TrimSpace(getenv("WORKLOAD_SERVER_URL")),
-		BootstrapToken: strings.TrimSpace(getenv("WORKLOAD_WORKER_BOOTSTRAP_TOKEN")),
-		DisplayName:    strings.TrimSpace(getenv("WORKLOAD_WORKER_NAME")),
+		ServerURL:          strings.TrimSpace(getenv("WORKLOAD_SERVER_URL")),
+		BootstrapToken:     strings.TrimSpace(getenv("WORKLOAD_WORKER_BOOTSTRAP_TOKEN")),
+		DisplayName:        strings.TrimSpace(getenv("WORKLOAD_WORKER_NAME")),
+		TracingMode:        strings.TrimSpace(getenv("WORKLOAD_WORKER_TRACING_MODE")),
+		TracingServiceName: strings.TrimSpace(getenv("WORKLOAD_WORKER_TRACING_SERVICE_NAME")),
+		LogLevel:           strings.TrimSpace(getenv("WORKLOAD_LOG_LEVEL")),
+		LogFormat:          strings.TrimSpace(getenv("WORKLOAD_LOG_FORMAT")),
 	}
 	var err error
 	config.MaxConcurrency, err = positiveInt(getenv("WORKLOAD_WORKER_CONCURRENCY"), 1)
@@ -62,6 +72,18 @@ func Load(getenv func(string) string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("WORKLOAD_MOCK_EXECUTION_DELAY: %w", err)
 		}
+	}
+	if config.TracingMode == "" {
+		config.TracingMode = "off"
+	}
+	if config.TracingServiceName == "" {
+		config.TracingServiceName = "workload-worker"
+	}
+	if config.LogLevel == "" {
+		config.LogLevel = "info"
+	}
+	if config.LogFormat == "" {
+		config.LogFormat = "text"
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
@@ -95,6 +117,18 @@ func (c Config) Validate() error {
 	}
 	if c.MockExecutionDelay < 0 || c.MockExecutionDelay > 5*time.Minute {
 		return fmt.Errorf("WORKLOAD_MOCK_EXECUTION_DELAY must be between 0s and 5m")
+	}
+	if c.TracingMode != "off" && c.TracingMode != "stdout" && c.TracingMode != "memory" {
+		return fmt.Errorf("unsupported Worker tracing mode %q", c.TracingMode)
+	}
+	if strings.TrimSpace(c.TracingServiceName) == "" {
+		return fmt.Errorf("Worker tracing service name is required")
+	}
+	if c.LogLevel != "debug" && c.LogLevel != "info" && c.LogLevel != "warn" && c.LogLevel != "error" {
+		return fmt.Errorf("unsupported Worker log level %q", c.LogLevel)
+	}
+	if c.LogFormat != "text" && c.LogFormat != "json" {
+		return fmt.Errorf("unsupported Worker log format %q", c.LogFormat)
 	}
 	return nil
 }

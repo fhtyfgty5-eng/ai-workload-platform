@@ -13,9 +13,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/auth"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
+	"go.opentelemetry.io/otel"
 )
 
 const defaultMaxBodyBytes int64 = 1 << 20
@@ -99,7 +102,20 @@ func (c *Client) Drain(ctx context.Context, workerID, sessionToken string) (work
 	return response, err
 }
 
-func (c *Client) do(ctx context.Context, method string, segments []string, token string, body any, target any) error {
+func (c *Client) do(ctx context.Context, method string, segments []string, token string, body any, target any) (resultErr error) {
+	startedAt := time.Now()
+	operation := workerOperation(segments)
+	ctx, span := observability.StartSpan(ctx, otel.Tracer("workload-worker"), "worker."+operation)
+	defer func() {
+		outcome := "success"
+		errorCode := ""
+		if resultErr != nil {
+			outcome = "error"
+			errorCode = ErrorCode(resultErr)
+		}
+		observability.FinishSpan(span, outcome, errorCode)
+		span.End()
+	}()
 	if strings.TrimSpace(token) == "" {
 		return auth.ErrUnauthorized
 	}
@@ -118,12 +134,13 @@ func (c *Client) do(ctx context.Context, method string, segments []string, token
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set(workerprotocol.ProtocolVersionHeader, strconv.Itoa(workerprotocol.ProtocolVersion))
 	request.Header.Set("Content-Type", "application/json")
+	observability.InjectHTTP(ctx, request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	c.logger.Debug("worker HTTP request", "method", method, "path", endpoint.EscapedPath(), "status", response.StatusCode)
+	observability.LoggerFromContext(ctx, c.logger).Debug("worker HTTP request", "method", method, "path", endpoint.EscapedPath(), "status", response.StatusCode, "duration_ms", time.Since(startedAt).Milliseconds(), "operation", operation)
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return c.decodeAPIError(response)
 	}
@@ -131,6 +148,42 @@ func (c *Client) do(ctx context.Context, method string, segments []string, token
 		return nil
 	}
 	return decodeLimited(response.Body, c.maxBodyBytes, target)
+}
+
+// ErrorCode 把 Worker Client 错误归一为日志、指标和 Span 共用的稳定分类。
+func ErrorCode(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code != "" {
+		return observability.NormalizeErrorCode(apiErr.Code)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, auth.ErrUnauthorized) {
+		return "unauthorized"
+	}
+	return "unknown"
+}
+
+func workerOperation(segments []string) string {
+	if len(segments) == 0 {
+		return "unknown"
+	}
+	last := segments[len(segments)-1]
+	switch last {
+	case "register":
+		return "register"
+	case "claims":
+		return "claim"
+	case "heartbeat":
+		return "heartbeat"
+	case "complete":
+		return "complete"
+	case "drain":
+		return "drain"
+	default:
+		return "unknown"
+	}
 }
 
 func (c *Client) endpoint(segments ...string) (*url.URL, error) {

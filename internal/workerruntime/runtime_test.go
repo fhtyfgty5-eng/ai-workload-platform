@@ -1,16 +1,74 @@
 package workerruntime
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerclient"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+func TestRuntimeLogsLeaseIdentityWithoutActionInputOrToken(t *testing.T) {
+	client := newFakeClient()
+	lease := testLease("dispatch-log")
+	lease.Input = map[string]any{"secret": "private-input"}
+	client.claims = [][]workerprotocol.Lease{{lease}}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	runtime, err := New(client, immediateExecutor{}, Options{
+		BootstrapToken: clientBootstrapToken,
+		Registration:   workerprotocol.RegisterRequest{DisplayName: "log-worker", ProtocolVersion: 1, ExecutorKinds: []workflow.ExecutorKind{workflow.ExecutorMock}, MaxConcurrency: 1},
+		PollMin:        5 * time.Millisecond, PollMax: 20 * time.Millisecond, HeartbeatInterval: 5 * time.Millisecond,
+		ShutdownTimeout: 20 * time.Millisecond, RetryInterval: 5 * time.Millisecond, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = runtime.Run(ctx)
+	got := output.String()
+	for _, want := range []string{"run_id=run", "task_key=task", "attempt=1", "worker_id=worker", "dispatch_id=dispatch-log"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("lease log = %q, missing %q", got, want)
+		}
+	}
+	for _, forbidden := range []string{"private-input", "session-runtime-secret", "lease-dispatch-log", "action=mock"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("lease log leaked %q: %s", forbidden, got)
+		}
+	}
+}
+
+func TestRuntimeObserveUsesStableWorkerAPIErrorCode(t *testing.T) {
+	var output bytes.Buffer
+	metrics := observability.NewMetrics(prometheus.NewRegistry())
+	runtime := &Runtime{options: Options{
+		Logger:  slog.New(slog.NewTextHandler(&output, nil)),
+		Metrics: metrics,
+	}}
+	runtime.observe("complete", time.Now().Add(-time.Millisecond), &workerclient.APIError{Status: 409, Code: "lease_lost"})
+
+	if !strings.Contains(output.String(), "error_code=lease_lost") {
+		t.Fatalf("runtime log = %q, want stable error code", output.String())
+	}
+	text, err := observability.GatherText(metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, `error_code="lease_lost"`) {
+		t.Fatalf("runtime metrics did not retain stable error code: %s", text)
+	}
+}
 
 const (
 	clientBootstrapToken = "bootstrap-runtime-secret"

@@ -27,14 +27,16 @@ type operation struct {
 }
 
 type operationExpectation struct {
-	Path     string
-	Method   string
-	Success  string
-	Schema   string
-	Security string
+	Path      string
+	Method    string
+	Success   string
+	Schema    string
+	Security  string
+	MediaType string
 }
 
 var implementedOperations = []operationExpectation{
+	{Path: "/metrics", Method: "get", Success: "200", Schema: "MetricsText", Security: "bearerAuth", MediaType: "text/plain"},
 	{Path: "/health/live", Method: "get", Success: "200", Schema: "HealthResponse"},
 	{Path: "/health/ready", Method: "get", Success: "200", Schema: "HealthResponse"},
 	{Path: "/api/v1/workflows", Method: "get", Success: "200", Schema: "WorkflowPage", Security: "bearerAuth"},
@@ -78,7 +80,7 @@ func TestOpenAPI31DocumentsEveryImplementedOperationAndSuccessSchema(t *testing.
 			t.Errorf("OpenAPI missing operation %s", key)
 			continue
 		}
-		got := responseSchemaRef(t, document, operation.Responses[expected.Success])
+		got := responseSchemaRefForMedia(t, document, operation.Responses[expected.Success], expected.MediaType)
 		want := "#/components/schemas/" + expected.Schema
 		if got != want {
 			t.Errorf("%s success schema = %q, want %q", key, got, want)
@@ -190,13 +192,20 @@ func loadOpenAPI(t *testing.T) (openAPIDocument, *yaml.Node) {
 }
 
 func responseSchemaRef(t *testing.T, document openAPIDocument, response yaml.Node) string {
+	return responseSchemaRefForMedia(t, document, response, "application/json")
+}
+
+func responseSchemaRefForMedia(t *testing.T, document openAPIDocument, response yaml.Node, mediaType string) string {
 	t.Helper()
+	if mediaType == "" {
+		mediaType = "application/json"
+	}
 	if response.Kind == 0 {
 		return ""
 	}
 	response = resolveResponse(t, document, response)
 	content := mappingValue(response, "content")
-	media := mappingValue(content, "application/json")
+	media := mappingValue(content, mediaType)
 	schema := mappingValue(media, "schema")
 	return scalar(mappingValue(schema, "$ref"))
 }

@@ -8,9 +8,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+func TestCoordinatorRecordsLeaseReclaimDuration(t *testing.T) {
+	metrics := observability.NewMetrics(prometheus.NewRegistry())
+	store := &fakeDispatchStore{}
+	coordinator := NewCoordinator(store, func(context.Context) (Lock, error) { return &fakeDispatchLock{}, nil }, CoordinatorOptions{
+		ScanInterval: time.Hour, LockCheckInterval: time.Hour, Metrics: metrics,
+	})
+	if err := coordinator.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	if !waitForCount(&store.mu, &store.reaps, 1, time.Second) {
+		t.Fatal("coordinator did not run lease reaper")
+	}
+	text, err := observability.GatherText(metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "workload_lease_reclaim_duration_seconds_count 1") {
+		t.Fatalf("lease reclaim metric was not observed: %s", text)
+	}
+	if !strings.Contains(text, `operation="dispatch_schedule"`) {
+		t.Fatalf("dispatch schedule metric was not observed: %s", text)
+	}
+}
 
 func TestCoordinatorStartsWithImmediateScanAndCoalescesWakeups(t *testing.T) {
 	store := &fakeDispatchStore{scanBlock: make(chan struct{}), scanStarted: make(chan struct{})}

@@ -31,6 +31,10 @@ type Config struct {
 	LogLevel             string
 	LogFormat            string
 	MockExecutionDelay   time.Duration
+	TracingMode          string
+	TracingServiceName   string
+	AlertWebhookURL      string
+	AlertWebhookTimeout  time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -46,6 +50,10 @@ func Load(getenv func(string) string) (Config, error) {
 		DispatchLimit:        defaultDispatchLimit,
 		LogLevel:             strings.TrimSpace(getenv("WORKLOAD_LOG_LEVEL")),
 		LogFormat:            strings.TrimSpace(getenv("WORKLOAD_LOG_FORMAT")),
+		TracingMode:          strings.TrimSpace(getenv("WORKLOAD_TRACING_MODE")),
+		TracingServiceName:   strings.TrimSpace(getenv("WORKLOAD_TRACING_SERVICE_NAME")),
+		AlertWebhookURL:      strings.TrimSpace(getenv("WORKLOAD_ALERT_WEBHOOK_URL")),
+		AlertWebhookTimeout:  time.Second,
 	}
 	var parseErr error
 	if value := strings.TrimSpace(getenv("WORKLOAD_HEARTBEAT_INTERVAL")); value != "" {
@@ -89,6 +97,18 @@ func Load(getenv func(string) string) (Config, error) {
 	if config.LogFormat == "" {
 		config.LogFormat = "text"
 	}
+	if config.TracingMode == "" {
+		config.TracingMode = "off"
+	}
+	if config.TracingServiceName == "" {
+		config.TracingServiceName = "workload-server"
+	}
+	if value := strings.TrimSpace(getenv("WORKLOAD_ALERT_WEBHOOK_TIMEOUT")); value != "" {
+		config.AlertWebhookTimeout, parseErr = time.ParseDuration(value)
+		if parseErr != nil {
+			return Config{}, fmt.Errorf("WORKLOAD_ALERT_WEBHOOK_TIMEOUT must be a Go duration: %w", parseErr)
+		}
+	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -126,6 +146,21 @@ func (c Config) Validate() error {
 	}
 	if c.LogFormat != "text" && c.LogFormat != "json" {
 		return fmt.Errorf("unsupported log format %q", c.LogFormat)
+	}
+	if c.TracingMode != "off" && c.TracingMode != "stdout" && c.TracingMode != "memory" {
+		return fmt.Errorf("unsupported tracing mode %q", c.TracingMode)
+	}
+	if strings.TrimSpace(c.TracingServiceName) == "" {
+		return fmt.Errorf("tracing service name is required")
+	}
+	if c.AlertWebhookTimeout <= 0 {
+		return fmt.Errorf("alert webhook timeout must be positive")
+	}
+	if c.AlertWebhookURL != "" {
+		parsed, err := url.Parse(c.AlertWebhookURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+			return fmt.Errorf("alert webhook URL must be an HTTP(S) URL without credentials")
+		}
 	}
 	if c.MockExecutionDelay < 0 || c.MockExecutionDelay > maxMockExecutionDelay {
 		return fmt.Errorf("WORKLOAD_MOCK_EXECUTION_DELAY must be between 0s and %s", maxMockExecutionDelay)

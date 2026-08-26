@@ -5,16 +5,37 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 )
+
+func TestObserveLogsStableWorkerFieldsWithoutCredentials(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(observability.NewSanitizingHandler(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	server := &Server{logger: logger}
+	server.observe(context.Background(), observability.LogFields{
+		RequestID: "req-observe", WorkerID: "worker-observe", DispatchID: "dispatch-observe", Operation: "complete",
+	}, time.Now().Add(-time.Millisecond), fmt.Errorf("Authorization: Bearer session-secret: %w", postgres.ErrLeaseLost))
+	got := output.String()
+	for _, want := range []string{"request_id=req-observe", "worker_id=worker-observe", "dispatch_id=dispatch-observe", "operation=complete", "error_code=lease_lost"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("operation log = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "session-secret") {
+		t.Fatalf("operation log leaked credential: %q", got)
+	}
+}
 
 const (
 	testBootstrapToken = "bootstrap-test-token"

@@ -13,9 +13,68 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerprotocol"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+func TestClientPropagatesParentTraceAndRecordsSuccessfulSpan(t *testing.T) {
+	provider, closeProvider, err := observability.NewTracerProvider(observability.TracingConfig{Mode: "memory", ServiceName: "worker-client-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeProvider(context.Background())
+	recorder := tracetest.NewSpanRecorder()
+	provider.RegisterSpanProcessor(recorder)
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Header.Get("traceparent") == "" {
+			t.Fatal("Worker request did not carry traceparent")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"leases":[]}`)),
+			Request:    request,
+		}, nil
+	})
+	var logOutput bytes.Buffer
+	client, err := New(Config{
+		BaseURL: "http://worker.test", HTTPClient: &http.Client{Transport: transport},
+		Logger: slog.New(slog.NewTextHandler(&logOutput, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, parent := provider.Tracer("test").Start(context.Background(), "worker.poll")
+	if _, err := client.Claim(ctx, "worker-one", clientSessionToken, 1); err != nil {
+		t.Fatal(err)
+	}
+	parent.End()
+	if got := logOutput.String(); !strings.Contains(got, "trace_id=") || !strings.Contains(got, "span_id=") {
+		t.Fatalf("Worker Client log = %q, want trace_id and span_id", got)
+	}
+
+	spans := recorder.Ended()
+	if len(spans) != 2 {
+		t.Fatalf("spans = %d, want parent and worker.claim", len(spans))
+	}
+	for _, span := range spans {
+		if span.Name() == "worker.claim" {
+			if span.Parent().SpanID() != parent.SpanContext().SpanID() || span.Status().Code.String() != "Ok" {
+				t.Fatalf("worker.claim parent/status = %s/%s", span.Parent().SpanID(), span.Status().Code)
+			}
+			return
+		}
+	}
+	t.Fatal("worker.claim span not found")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 const (
 	clientBootstrapToken = "bootstrap-client-secret"

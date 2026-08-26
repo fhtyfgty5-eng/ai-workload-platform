@@ -29,10 +29,13 @@ func TestNewLoggerUsesConfiguredFormatAndLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 	logger.Info("hidden")
-	logger.Warn("visible")
+	logger.Warn("visible", "error", errors.New("Authorization: Bearer production-secret"))
 	got := output.String()
 	if strings.Contains(got, "hidden") || !strings.Contains(got, `"level":"WARN"`) || !strings.Contains(got, `"msg":"visible"`) {
 		t.Fatalf("logger output = %q", got)
+	}
+	if strings.Contains(got, "production-secret") || !strings.Contains(got, "<redacted>") {
+		t.Fatalf("logger leaked secret: %q", got)
 	}
 }
 

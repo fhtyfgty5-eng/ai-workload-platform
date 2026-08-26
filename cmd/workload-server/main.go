@@ -12,10 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/alerting"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/app"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/config"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/dispatch"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/httpapi"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/postgres"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerapi"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
@@ -55,6 +57,12 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	metrics := observability.NewMetrics(nil)
+	tracerProvider, closeTracer, err := observability.NewTracerProvider(observability.TracingConfig{Mode: cfg.TracingMode, ServiceName: cfg.TracingServiceName, Writer: os.Stderr})
+	if err != nil {
+		return err
+	}
+	defer closeTracer(context.Background())
 	repository, err := postgres.NewWithOptions(ctx, cfg.DatabaseURL, postgres.Options{
 		WorkerHeartbeatInterval: cfg.HeartbeatInterval,
 		LeaseDuration:           cfg.LeaseDuration,
@@ -70,10 +78,49 @@ func serve() error {
 	coordinator := dispatch.NewCoordinator(repository, func(ctx context.Context) (dispatch.Lock, error) {
 		return repository.AcquireAdvisoryLock(ctx)
 	}, dispatch.CoordinatorOptions{
-		ScanInterval: cfg.ReaperInterval, BatchSize: cfg.DispatchLimit,
+		ScanInterval: cfg.ReaperInterval, BatchSize: cfg.DispatchLimit, Metrics: metrics,
+		ObserveMetrics: func(ctx context.Context) {
+			snapshot, err := repository.AlertSnapshot(ctx)
+			if err != nil {
+				logger.Warn("observe dispatch state failed", "operation", "metrics_snapshot", "error", err)
+				return
+			}
+			metrics.SetQueueDepth("pending", snapshot.QueueDepth)
+			metrics.SetWorkers("active", snapshot.OnlineWorkers)
+			metrics.SetActiveLeases(snapshot.ActiveLeases)
+			total, inUse, idle, wait := repository.PoolObservation()
+			metrics.SetDBPool("total", total)
+			metrics.SetDBPool("in_use", inUse)
+			metrics.SetDBPool("idle", idle)
+			metrics.ObserveDBPoolWait(wait)
+		},
 	})
 	if err := coordinator.Start(ctx); err != nil {
 		return err
+	}
+	if cfg.AlertWebhookURL != "" {
+		sink, err := alerting.NewWebhookSink(http.DefaultClient, cfg.AlertWebhookURL, cfg.AlertWebhookTimeout, 2)
+		if err != nil {
+			return err
+		}
+		provider := func(ctx context.Context) (alerting.Snapshot, error) {
+			snapshot, err := repository.AlertSnapshot(ctx)
+			if err != nil {
+				return alerting.Snapshot{}, err
+			}
+			total, inUse, idle, wait := repository.PoolObservation()
+			metrics.SetQueueDepth("pending", snapshot.QueueDepth)
+			metrics.SetWorkers("active", snapshot.OnlineWorkers)
+			metrics.SetActiveLeases(snapshot.ActiveLeases)
+			metrics.SetDBPool("total", total)
+			metrics.SetDBPool("in_use", inUse)
+			metrics.SetDBPool("idle", idle)
+			metrics.ObserveDBPoolWait(wait)
+			snapshot.CompleteTotal, snapshot.CompleteErrors, snapshot.LeaseReclaimErrors = metrics.AlertCounters(snapshot.Now, 30*time.Second)
+			return snapshot, nil
+		}
+		runner := alerting.NewRunner(alerting.NewEngine(alerting.DefaultRules()), provider, sink, time.Second, logger, metrics)
+		go runner.Run(ctx)
 	}
 	runs, err := app.NewRunService(repository, definitions, coordinator, nil)
 	if err != nil {
@@ -87,6 +134,9 @@ func serve() error {
 		HeartbeatInterval: cfg.HeartbeatInterval,
 		LeaseDuration:     cfg.LeaseDuration,
 		Wake:              coordinator.Wake,
+		Metrics:           metrics,
+		Tracer:            tracerProvider.Tracer("workload-worker-api"),
+		Logger:            logger,
 	})
 	if err != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -95,7 +145,7 @@ func serve() error {
 		return err
 	}
 	logger.Info("workload server ready", "addr", cfg.HTTPAddr)
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewHandler(httpapi.Dependencies{Workflows: definitions, Runs: runs, Workers: workers, ViewerToken: cfg.ViewerToken, OperatorToken: cfg.OperatorToken, Ready: coordinator.Ready, Logger: logger})}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewHandler(httpapi.Dependencies{Workflows: definitions, Runs: runs, Workers: workers, ViewerToken: cfg.ViewerToken, OperatorToken: cfg.OperatorToken, Ready: coordinator.Ready, Logger: logger, Metrics: metrics, Tracer: tracerProvider.Tracer("workload-server")})}
 	return superviseServer(ctx, server, coordinator, 5*time.Second)
 }
 
@@ -145,27 +195,7 @@ func superviseServer(ctx context.Context, server lifecycleHTTPServer, coordinato
 }
 
 func newLogger(cfg config.Config, output io.Writer) (*slog.Logger, error) {
-	var level slog.Level
-	switch cfg.LogLevel {
-	case "debug":
-		level = slog.LevelDebug
-	case "info":
-		level = slog.LevelInfo
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		return nil, fmt.Errorf("unsupported log level %q", cfg.LogLevel)
-	}
-	options := &slog.HandlerOptions{Level: level}
-	if cfg.LogFormat == "json" {
-		return slog.New(slog.NewJSONHandler(output, options)), nil
-	}
-	if cfg.LogFormat == "text" {
-		return slog.New(slog.NewTextHandler(output, options)), nil
-	}
-	return nil, fmt.Errorf("unsupported log format %q", cfg.LogFormat)
+	return observability.NewLogger(output, cfg.LogFormat, cfg.LogLevel)
 }
 
 // successExecutor 是模块 2 的安全演示执行器：只等待固定时长，不解释或运行 Action。

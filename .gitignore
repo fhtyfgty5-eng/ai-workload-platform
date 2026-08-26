@@ -1,3 +1,4 @@
 .workload/
+artifacts/
 .env.local
 .env
