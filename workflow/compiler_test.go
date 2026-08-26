@@ -123,6 +123,19 @@ func TestCompileRejectsUnsupportedExecutor(t *testing.T) {
 	}
 }
 
+func TestCompileAcceptsContainerExecutor(t *testing.T) {
+	definition := WorkflowDefinition{ID: "container-workflow", Concurrency: 1, Tasks: []TaskDefinition{{
+		Key: "task", Executor: ExecutorContainer, Action: "document.normalize", TimeoutMillis: 1000,
+	}}}
+	compiled, err := Compile(definition)
+	if err != nil {
+		t.Fatalf("Compile() error = %v, want container executor accepted", err)
+	}
+	if got := compiled.Definition().Tasks[0].Executor; got != ExecutorContainer {
+		t.Fatalf("compiled executor = %q, want %q", got, ExecutorContainer)
+	}
+}
+
 func TestCompileBuildsIndexAndDependencies(t *testing.T) {
 	def := WorkflowDefinition{
 		ID:          "document-pipeline",

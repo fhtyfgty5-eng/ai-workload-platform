@@ -1,0 +1,11 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-task-egress
+  namespace: workload-tasks
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: workload-task
+  policyTypes: ["Egress"]
+  egress: []

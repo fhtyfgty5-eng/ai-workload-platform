@@ -48,13 +48,16 @@ type Options struct {
 	Metrics *observability.Metrics
 	// Logger 可选；只记录非敏感生命周期信息。
 	Logger *slog.Logger
+	// Executors 按 Lease.ExecutorKind 选择具体执行器；为空时使用 executor 兼容旧调用方。
+	Executors map[workflow.ExecutorKind]workflow.Executor
 }
 
 // Runtime 组合控制面客户端、执行器和运行策略，管理一个 Worker 会话的完整生命周期。
 type Runtime struct {
-	client   Client
-	executor workflow.Executor
-	options  Options
+	client    Client
+	executor  workflow.Executor
+	executors map[workflow.ExecutorKind]workflow.Executor
+	options   Options
 }
 
 // activeLease 保存一个本地执行中的租约及其取消和续租信号。
@@ -69,7 +72,7 @@ type activeLease struct {
 
 // New 校验 Worker 依赖与运行策略，并构造尚未注册会话的 Runtime。
 func New(client Client, executor workflow.Executor, options Options) (*Runtime, error) {
-	if client == nil || executor == nil {
+	if client == nil || (executor == nil && len(options.Executors) == 0) {
 		return nil, fmt.Errorf("Worker client and executor are required")
 	}
 	if options.BootstrapToken == "" {
@@ -96,7 +99,18 @@ func New(client Client, executor workflow.Executor, options Options) (*Runtime, 
 	if options.Logger == nil {
 		options.Logger = slog.Default()
 	}
-	return &Runtime{client: client, executor: executor, options: options}, nil
+	executors := make(map[workflow.ExecutorKind]workflow.Executor, len(options.Executors)+1)
+	for kind, item := range options.Executors {
+		if item != nil {
+			executors[kind] = item
+		}
+	}
+	if executor != nil {
+		if _, exists := executors[workflow.ExecutorMock]; !exists {
+			executors[workflow.ExecutorMock] = executor
+		}
+	}
+	return &Runtime{client: client, executor: executor, executors: executors, options: options}, nil
 }
 
 // Run 注册一个会话并持续领取和执行任务；父 Context 取消后先 drain，
@@ -242,7 +256,12 @@ func (r *Runtime) startLease(runCtx context.Context, workerID, sessionToken stri
 		logger := observability.LoggerFromContext(observability.WithFields(leaseCtx, fields), r.options.Logger)
 		logger.Debug("worker lease execution started")
 		go r.enforceLocalSafetyDeadline(leaseCtx, active)
-		response := r.executor.Execute(leaseCtx, workflow.ExecutionRequest{
+		executor := r.executorFor(lease.ExecutorKind)
+		if executor == nil {
+			logger.Warn("worker lease executor is unsupported", "executor_kind", lease.ExecutorKind)
+			return
+		}
+		response := executor.Execute(leaseCtx, workflow.ExecutionRequest{
 			DefinitionID: lease.DefinitionID,
 			RunID:        lease.RunID,
 			TaskKey:      lease.TaskKey,
@@ -261,6 +280,18 @@ func (r *Runtime) startLease(runCtx context.Context, workerID, sessionToken stri
 		}
 		logger.Debug("worker lease execution completed", "result_kind", response.Kind, "duration_ms", time.Since(startedAt).Milliseconds())
 	}()
+}
+
+func (r *Runtime) executorFor(kind workflow.ExecutorKind) workflow.Executor {
+	if r.executors != nil {
+		if executor := r.executors[kind]; executor != nil {
+			return executor
+		}
+	}
+	if kind == workflow.ExecutorMock {
+		return r.executor
+	}
+	return nil
 }
 
 // enforceLocalSafetyDeadline 使用服务端剩余租约时间更新本地计时器，

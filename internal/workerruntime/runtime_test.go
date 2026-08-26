@@ -49,6 +49,39 @@ func TestRuntimeLogsLeaseIdentityWithoutActionInputOrToken(t *testing.T) {
 	}
 }
 
+func TestRuntimeSelectsExecutorByLeaseKind(t *testing.T) {
+	client := newFakeClient()
+	lease := testLease("dispatch-container")
+	lease.ExecutorKind = workflow.ExecutorContainer
+	client.claims = [][]workerprotocol.Lease{{lease}}
+	mock := &recordingExecutor{}
+	container := &recordingExecutor{}
+	runtime, err := New(client, mock, Options{
+		BootstrapToken: clientBootstrapToken,
+		Registration: workerprotocol.RegisterRequest{DisplayName: "container-worker", ProtocolVersion: 1,
+			ExecutorKinds: []workflow.ExecutorKind{workflow.ExecutorMock, workflow.ExecutorContainer}, MaxConcurrency: 1},
+		Executors: map[workflow.ExecutorKind]workflow.Executor{workflow.ExecutorMock: mock, workflow.ExecutorContainer: container},
+		PollMin:   5 * time.Millisecond, PollMax: 20 * time.Millisecond, HeartbeatInterval: 5 * time.Millisecond,
+		ShutdownTimeout: 20 * time.Millisecond, RetryInterval: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = runtime.Run(ctx)
+	if container.calls != 1 || mock.calls != 0 {
+		t.Fatalf("executor calls = container:%d mock:%d, want container only", container.calls, mock.calls)
+	}
+}
+
+type recordingExecutor struct{ calls int }
+
+func (e *recordingExecutor) Execute(context.Context, workflow.ExecutionRequest) workflow.ExecutionResponse {
+	e.calls++
+	return workflow.ExecutionResponse{Kind: workflow.ResultSuccess, Output: "ok"}
+}
+
 func TestRuntimeObserveUsesStableWorkerAPIErrorCode(t *testing.T) {
 	var output bytes.Buffer
 	metrics := observability.NewMetrics(prometheus.NewRegistry())

@@ -32,6 +32,10 @@ required_files=(
   "docs/计划/项目路线图.md"
   "docs/计划/模块0详细计划.md"
   "docs/计划/模块1需求与设计.md"
+  "docs/计划/模块6需求与设计.md"
+  "docs/计划/模块6实施计划.md"
+  "docs/学习/文章/模块6-受限执行环境与Kubernetes.md"
+  "docs/实验/模块6验证报告.md"
   "docs/决策/ADR-0001-项目范围.md"
   "docs/决策/ADR-0002-产品定位与模块路线调整.md"
 )

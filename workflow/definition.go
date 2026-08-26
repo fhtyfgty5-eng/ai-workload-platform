@@ -9,6 +9,8 @@ type ExecutorKind string
 const (
 	// ExecutorMock 是真实执行环境完成前唯一允许的执行器类型。
 	ExecutorMock ExecutorKind = "mock"
+	// ExecutorContainer 表示由受限容器运行时执行已注册动作。
+	ExecutorContainer ExecutorKind = "container"
 )
 
 // RetryPolicy 描述任务允许的最大尝试次数和固定重试间隔。

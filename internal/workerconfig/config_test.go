@@ -70,6 +70,29 @@ func TestWorkerConfigValidatesLogging(t *testing.T) {
 	}
 }
 
+func TestWorkerConfigValidatesExecutionRuntime(t *testing.T) {
+	base := map[string]string{
+		"WORKLOAD_SERVER_URL":             "http://127.0.0.1:8080",
+		"WORKLOAD_WORKER_BOOTSTRAP_TOKEN": "worker-bootstrap-secret",
+		"WORKLOAD_WORKER_NAME":            "worker-one",
+	}
+	config, err := Load(func(key string) string { return base[key] })
+	if err != nil || config.Runtime != "mock" {
+		t.Fatalf("runtime default = %q, error = %v", config.Runtime, err)
+	}
+	for _, runtime := range []string{"docker", "kubernetes"} {
+		base["WORKLOAD_WORKER_RUNTIME"] = runtime
+		config, err := Load(func(key string) string { return base[key] })
+		if err != nil || config.Runtime != runtime {
+			t.Fatalf("runtime %q = %+v, %v", runtime, config, err)
+		}
+	}
+	base["WORKLOAD_WORKER_RUNTIME"] = "shell"
+	if _, err := Load(func(key string) string { return base[key] }); err == nil {
+		t.Fatal("Load() accepted shell runtime")
+	}
+}
+
 func TestWorkerConfigRequiresHTTPSForNonLoopbackServer(t *testing.T) {
 	base := map[string]string{
 		"WORKLOAD_SERVER_URL":              "http://example.test:8080",

@@ -27,6 +27,10 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	// MockExecutionDelay 只用于演示和故障测试，不代表真实任务耗时。
 	MockExecutionDelay time.Duration
+	// Runtime 选择 mock、docker 或 kubernetes 执行器，默认使用 mock 保持兼容。
+	Runtime string
+	// ActionImage 是受控执行器使用的固定本地任务镜像；请求不能覆盖它。
+	ActionImage string
 	// TracingMode 控制独立 Worker 的 Span 导出；TracingServiceName 标识导出来源。
 	TracingMode        string
 	TracingServiceName string
@@ -45,6 +49,8 @@ func Load(getenv func(string) string) (Config, error) {
 		TracingServiceName: strings.TrimSpace(getenv("WORKLOAD_WORKER_TRACING_SERVICE_NAME")),
 		LogLevel:           strings.TrimSpace(getenv("WORKLOAD_LOG_LEVEL")),
 		LogFormat:          strings.TrimSpace(getenv("WORKLOAD_LOG_FORMAT")),
+		Runtime:            strings.TrimSpace(getenv("WORKLOAD_WORKER_RUNTIME")),
+		ActionImage:        strings.TrimSpace(getenv("WORKLOAD_WORKER_ACTION_IMAGE")),
 	}
 	var err error
 	config.MaxConcurrency, err = positiveInt(getenv("WORKLOAD_WORKER_CONCURRENCY"), 1)
@@ -75,6 +81,12 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if config.TracingMode == "" {
 		config.TracingMode = "off"
+	}
+	if config.Runtime == "" {
+		config.Runtime = "mock"
+	}
+	if config.ActionImage == "" {
+		config.ActionImage = "workload-action:local"
 	}
 	if config.TracingServiceName == "" {
 		config.TracingServiceName = "workload-worker"
@@ -117,6 +129,12 @@ func (c Config) Validate() error {
 	}
 	if c.MockExecutionDelay < 0 || c.MockExecutionDelay > 5*time.Minute {
 		return fmt.Errorf("WORKLOAD_MOCK_EXECUTION_DELAY must be between 0s and 5m")
+	}
+	if c.Runtime != "mock" && c.Runtime != "docker" && c.Runtime != "kubernetes" {
+		return fmt.Errorf("unsupported Worker runtime %q", c.Runtime)
+	}
+	if c.Runtime != "mock" && c.ActionImage != "workload-action:local" && !strings.Contains(c.ActionImage, "@sha256:") {
+		return fmt.Errorf("WORKLOAD_WORKER_ACTION_IMAGE must use a digest reference")
 	}
 	if c.TracingMode != "off" && c.TracingMode != "stdout" && c.TracingMode != "memory" {
 		return fmt.Errorf("unsupported Worker tracing mode %q", c.TracingMode)

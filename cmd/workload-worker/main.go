@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/containerexec"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/kubeexec"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerclient"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/workerconfig"
@@ -41,15 +43,37 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	runtime, err := workerruntime.New(client, newMockExecutor(cfg.MockExecutionDelay), workerruntime.Options{
+	mockExecutor := newMockExecutor(cfg.MockExecutionDelay)
+	executors := map[workflow.ExecutorKind]workflow.Executor{workflow.ExecutorMock: mockExecutor}
+	executorKinds := []workflow.ExecutorKind{workflow.ExecutorMock}
+	if cfg.Runtime == "docker" {
+		dockerRuntime, dockerErr := containerexec.NewDockerRuntimeClientFromEnv()
+		if dockerErr != nil {
+			fmt.Fprintln(os.Stderr, dockerErr)
+			os.Exit(1)
+		}
+		executors[workflow.ExecutorContainer] = &containerexec.DockerExecutor{Runtime: dockerRuntime, Registry: defaultActionRegistry(cfg.ActionImage)}
+		executorKinds = append(executorKinds, workflow.ExecutorContainer)
+	}
+	if cfg.Runtime == "kubernetes" {
+		kubeRuntime, kubeErr := kubeexec.NewClientFromKubeconfig(os.Getenv("KUBECONFIG"))
+		if kubeErr != nil {
+			fmt.Fprintln(os.Stderr, kubeErr)
+			os.Exit(1)
+		}
+		executors[workflow.ExecutorContainer] = &kubeexec.KubernetesExecutor{Client: kubeRuntime, Registry: defaultActionRegistry(cfg.ActionImage)}
+		executorKinds = append(executorKinds, workflow.ExecutorContainer)
+	}
+	runtime, err := workerruntime.New(client, mockExecutor, workerruntime.Options{
 		BootstrapToken: cfg.BootstrapToken,
 		Registration: workerprotocol.RegisterRequest{
 			DisplayName: cfg.DisplayName, ProtocolVersion: workerprotocol.ProtocolVersion,
-			ExecutorKinds: []workflow.ExecutorKind{workflow.ExecutorMock}, MaxConcurrency: cfg.MaxConcurrency,
+			ExecutorKinds: executorKinds, MaxConcurrency: cfg.MaxConcurrency,
 		},
 		PollMin: cfg.PollMin, PollMax: cfg.PollMax, HeartbeatInterval: cfg.HeartbeatInterval,
 		RetryInterval: 250 * time.Millisecond, SafetyMargin: time.Second, ShutdownTimeout: cfg.ShutdownTimeout,
-		Logger: logger,
+		Logger:    logger,
+		Executors: executors,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -59,6 +83,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func defaultActionRegistry(image string) containerexec.Registry {
+	specs, limits := containerexec.DefaultActionSpecs(image)
+	registry, err := containerexec.NewRegistry(specs, limits)
+	if err != nil {
+		panic(fmt.Sprintf("build default action registry: %v", err))
+	}
+	return registry
 }
 
 func newWorkerTracer(cfg workerconfig.Config, output io.Writer) (func(context.Context) error, error) {

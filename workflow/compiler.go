@@ -85,7 +85,7 @@ func Compile(def WorkflowDefinition) (*CompiledWorkflow, error) {
 		if task.Executor == "" {
 			task.Executor = ExecutorMock
 		}
-		if task.Executor != ExecutorMock {
+		if task.Executor != ExecutorMock && task.Executor != ExecutorContainer {
 			return nil, fmt.Errorf("task %q executor %q is not supported", task.Key, task.Executor)
 		}
 		if task.TimeoutMillis <= 0 {

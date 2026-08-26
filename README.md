@@ -2,7 +2,7 @@
 
 面向 Agent 与确定性程序任务的可靠运行时和调度平台。
 
-> 当前可运行范围：模块 5 已在模块 4 的多 Worker 可靠执行基础上增加结构化日志、低基数 Prometheus 指标、OpenTelemetry 调用链、本地 Webhook 告警和测试专用故障注入。Worker 当前只执行安全 Mock Action；真实 Agent 任务执行环境、任务容器、完整监控后台和 Web 控制台仍属于后续模块。
+> 当前可运行范围：模块 6 已在模块 5 的观测和故障验证基础上增加固定 Action 注册表、受限 Docker 容器执行、Kubernetes Job/Pod 描述和本地实验脚本。真实 Docker Go 执行器和 kind/client-go Job 已在本机 ARM64 环境通过验证。完整监控后台和 Web 控制台仍属于后续模块。
 
 ## 要解决的问题
 
@@ -38,7 +38,7 @@ CLI / SDK / 控制台
         |
         v
 Worker
-  |-> 普通程序执行器
+  |-> Mock / 受限容器执行器 -> Docker Engine API 或 Kubernetes API
   `-> Agent Runtime -> 模型 / 工具 / 人工审批
 ```
 
@@ -95,7 +95,7 @@ export WORKLOAD_WORKER_NAME='worker-a'
 go run ./cmd/workload-worker
 ```
 
-第二个 Worker 使用 `WORKLOAD_WORKER_NAME='worker-b'`。Worker 会自行注册、按空闲槽位领取、心跳续租并提交 Mock 结果。完整多 Worker 正常与故障演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。
+第二个 Worker 使用 `WORKLOAD_WORKER_NAME='worker-b'`。Worker 会自行注册、按空闲槽位领取、心跳续租并提交 Mock 结果。要执行模块 6 的受限任务，把 Worker 的 `WORKLOAD_WORKER_RUNTIME` 设为 `docker` 或 `kubernetes`，并准备仓库内固定动作镜像。完整演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。
 
 Docker 登录不是本地公开 PostgreSQL 镜像的前置条件。新电脑环境准备、完整运行步骤和当前推荐演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。该手册会随后续模块持续更新，README 只保留当前版本的最短启动入口。
 
@@ -153,7 +153,7 @@ go run ./cmd/workload run status <上一步返回的run_id>
 - 数据库连接或 Advisory Lock 运行期失效时，控制面会变为不可就绪并以错误退出，不在同一进程自动重新加锁。Worker 在无法续租时会在本地安全期限停止执行；新控制面进程启动后从 PostgreSQL 已提交状态恢复，这种基础设施中断不会被写成用户取消。
 - Workflow、Version、Run、Task 和 Event 列表使用不透明键集游标；Run 可按 `workflow_id`、`status` 组合过滤，游标只能在原资源和原过滤条件下继续使用。
 - 单个 WorkflowDefinition 最多包含 10,000 个任务；1,000 个 Run 是 Benchmark 输入规模，不是第 1,001 个 Run 的容量拒绝上限。
-- 当前已有多 Worker 分布式 Mock 执行，但没有真实命令执行、真实 Agent 任务执行、完整日志指标平台或安全沙箱；Mock Executor 不执行本机命令。
+- 当前已有多 Worker 分布式 Mock 执行和固定 Action 的受限 Docker/Kubernetes 执行；不接受任意 Shell、镜像、宿主机路径或 Docker Socket。容器不是绝对安全沙箱，真实 Agent 任务执行和完整日志指标平台仍不在范围内。
 - Worker 使用配置式引导 Token 注册，再使用会话 Token 调用领取、心跳、完成和 drain API；数据库只保存令牌摘要，查询 API 不返回凭据。
 - 租约和隔离令牌能拒绝旧结果，但不能撤销已经发生的外部副作用；分布式路径仍是至少执行一次。
 - 当前只有一个 Dispatch Coordinator；PostgreSQL Advisory Lock 会拒绝第二个协调者，不提供自动高可用切换。
@@ -181,7 +181,7 @@ go run ./cmd/workload run status <上一步返回的run_id>
 3. Agent Runtime、模型与工具执行，已完成；
 4. 多 Worker、租约、心跳与故障恢复，已完成；
 5. 可观测性、故障注入与性能验证，已完成工程实现、八类故障、五类告警和 24 组五轮性能对照；
-6. 受限执行环境与 Kubernetes；
+6. 受限执行环境与 Kubernetes，已完成执行器、固定动作镜像、清单、Docker 和 kind/client-go 真实验证；
 7. 真实场景、最小控制台与开源发布。
 
 各模块为什么按此顺序推进、上一模块留下什么问题、下一模块使用哪些技术解决，见[项目路线图](docs/计划/项目路线图.md)中的“模块递进关系”。模块 5 的当前设计见[模块 5 需求与设计](docs/计划/模块5需求与设计.md)。
@@ -206,6 +206,8 @@ go run ./cmd/workload run status <上一步返回的run_id>
 - [模块 5 需求与设计](docs/计划/模块5需求与设计.md)：观测旁路、低基数、Trace 边界、告警状态机和故障实验设计。
 - [模块 5 学习文章](docs/学习/文章/模块5-可观测性故障注入与性能验证.md)：结构化日志、Prometheus 指标、OpenTelemetry、告警、故障注入和性能口径。
 - [模块 5 验证报告](docs/实验/模块5验证报告.md)：八类故障、五类告警、24 组五轮基准和真实证据边界。
+- [模块 6 学习文章](docs/学习/文章/模块6-受限执行环境与Kubernetes.md)：固定 Action、Docker/Kubernetes 执行、安全边界、资源限制和本地验证。
+- [模块 6 验证报告](docs/实验/模块6验证报告.md)：Docker、kind/client-go 真实执行证据、静态清单和剩余实验边界。
 - [模块 1 性能基线](docs/实验/模块1性能基线.md)：10,000 任务、1,000 Run、恢复和 FileStore 的原始 Benchmark 数据。
 
 当前代码入口和限制见上方“快速开始”和“当前实现边界”。

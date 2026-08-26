@@ -1,0 +1,26 @@
+{
+  "id": "module6-container-demo",
+  "concurrency": 1,
+  "tasks": [
+    {
+      "key": "normalize",
+      "executor": "container",
+      "action": "document.normalize",
+      "input": {
+        "source": "  AI   workload   platform  "
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "key": "summarize",
+      "executor": "container",
+      "action": "document.summarize",
+      "input": {
+        "source": "reliable workflow execution with bounded containers",
+        "max_words": 5
+      },
+      "depends_on": ["normalize"],
+      "timeout_ms": 30000
+    }
+  ]
+}
