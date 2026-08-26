@@ -35,6 +35,7 @@ type Config struct {
 	TracingServiceName   string
 	AlertWebhookURL      string
 	AlertWebhookTimeout  time.Duration
+	ModelAdapter         string
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -54,6 +55,7 @@ func Load(getenv func(string) string) (Config, error) {
 		TracingServiceName:   strings.TrimSpace(getenv("WORKLOAD_TRACING_SERVICE_NAME")),
 		AlertWebhookURL:      strings.TrimSpace(getenv("WORKLOAD_ALERT_WEBHOOK_URL")),
 		AlertWebhookTimeout:  time.Second,
+		ModelAdapter:         strings.TrimSpace(getenv("WORKLOAD_MODEL_ADAPTER")),
 	}
 	var parseErr error
 	if value := strings.TrimSpace(getenv("WORKLOAD_HEARTBEAT_INTERVAL")); value != "" {
@@ -103,6 +105,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if config.TracingServiceName == "" {
 		config.TracingServiceName = "workload-server"
 	}
+	if config.ModelAdapter == "" {
+		config.ModelAdapter = "mock"
+	}
 	if value := strings.TrimSpace(getenv("WORKLOAD_ALERT_WEBHOOK_TIMEOUT")); value != "" {
 		config.AlertWebhookTimeout, parseErr = time.ParseDuration(value)
 		if parseErr != nil {
@@ -149,6 +154,9 @@ func (c Config) Validate() error {
 	}
 	if c.TracingMode != "off" && c.TracingMode != "stdout" && c.TracingMode != "memory" {
 		return fmt.Errorf("unsupported tracing mode %q", c.TracingMode)
+	}
+	if c.ModelAdapter != "mock" && c.ModelAdapter != "http" {
+		return fmt.Errorf("unsupported model adapter %q", c.ModelAdapter)
 	}
 	if strings.TrimSpace(c.TracingServiceName) == "" {
 		return fmt.Errorf("tracing service name is required")

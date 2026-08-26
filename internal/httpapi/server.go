@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/agent"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/app"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/auth"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/observability"
@@ -32,6 +33,7 @@ const defaultBodyLimit int64 = 1 << 20
 type Dependencies struct {
 	Workflows     app.WorkflowService
 	Runs          app.RunService
+	Drafts        DraftService
 	Workers       WorkerHandler
 	ViewerToken   string
 	OperatorToken string
@@ -40,6 +42,14 @@ type Dependencies struct {
 	Logger        *slog.Logger
 	Metrics       *observability.Metrics
 	Tracer        oteltrace.Tracer
+}
+
+// DraftService 是 HTTP 层使用的最小 Agent 草稿边界；草稿生命周期和哈希规则
+// 仍由 agent.Service 实现，HTTP Handler 不复制这些业务规则。
+type DraftService interface {
+	GenerateDraft(context.Context, string) (agent.WorkflowDraft, error)
+	ValidateDraft(context.Context, agent.WorkflowDraft) (agent.WorkflowDraft, error)
+	ConfirmDraft(context.Context, agent.WorkflowDraft, string) (workflow.WorkflowDefinition, error)
 }
 
 // WorkerHandler 使共享 HTTP 中间件不依赖 Worker 的具体存储实现。
@@ -59,6 +69,9 @@ func Routes() []string {
 		"/api/v1/workflows/{workflow-id}/versions",
 		"/api/v1/workflows/{workflow-id}/versions/{version}",
 		"/api/v1/workflows/{workflow-id}/versions/{version}/runs",
+		"/api/v1/agent/drafts",
+		"/api/v1/agent/drafts/{draft-id}/validate",
+		"/api/v1/agent/drafts/{draft-id}/confirm",
 		"/api/v1/runs",
 		"/api/v1/runs/{run-id}",
 		"/api/v1/runs/{run-id}/tasks",
@@ -195,6 +208,9 @@ func (w *loggingResponseWriter) WriteHeader(status int) {
 
 func dispatch(ctx context.Context, w http.ResponseWriter, r *http.Request, deps Dependencies, role auth.Role, requestID string) error {
 	parts := splitPath(r.URL.Path)
+	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "agent" {
+		return dispatchDraft(ctx, w, r, deps, role, requestID, parts)
+	}
 	if len(parts) == 3 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "workflows" {
 		if r.Method == http.MethodGet {
 			if deps.Workflows == nil {
@@ -442,6 +458,14 @@ func normalizedPath(path string) string {
 			return "/api/v1/workflows/{workflow-id}/versions/{version}/runs"
 		}
 	}
+	if parts[2] == "agent" {
+		switch {
+		case len(parts) == 4 && parts[3] == "drafts":
+			return "/api/v1/agent/drafts"
+		case len(parts) == 6 && parts[3] == "drafts" && (parts[5] == "validate" || parts[5] == "confirm"):
+			return "/api/v1/agent/drafts/{draft-id}/" + parts[5]
+		}
+	}
 	if parts[2] == "runs" {
 		switch {
 		case len(parts) == 4:
@@ -505,12 +529,44 @@ func mappedError(err error) (int, string, string) {
 		status, code, message = http.StatusConflict, "result_conflict", "Worker lease result conflicts with an earlier result"
 	case errors.Is(err, app.ErrInvalidArgument):
 		status, code, message = http.StatusBadRequest, "invalid_request", err.Error()
+	case isAgentError(err):
+		status, code, message = mapAgentError(err)
 	case errors.As(err, &bad):
 		status, code, message = http.StatusBadRequest, "invalid_request", bad.Error()
 	case errors.Is(err, errMethodNotAllowed):
 		status, code, message = http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed"
 	}
 	return status, code, message
+}
+
+func isAgentError(err error) bool {
+	var runtimeErr *agent.Error
+	return errors.As(err, &runtimeErr)
+}
+
+func mapAgentError(err error) (int, string, string) {
+	var runtimeErr *agent.Error
+	if !errors.As(err, &runtimeErr) {
+		return http.StatusInternalServerError, "internal_error", "internal server error"
+	}
+	code := string(runtimeErr.Code)
+	message := runtimeErr.Message
+	if message == "" {
+		message = "agent request failed"
+	}
+	switch runtimeErr.Code {
+	case agent.CodeDraftChanged, agent.CodeApprovalRequired:
+		return http.StatusConflict, code, message
+	case agent.CodeModelUnavailable, agent.CodeModelTimeout:
+		return http.StatusServiceUnavailable, code, message
+	case agent.CodeModelInvalidResponse, agent.CodeToolNotAllowed, agent.CodeToolInvalidInput,
+		agent.CodeToolTimeout, agent.CodeBudgetExceeded, agent.CodeDraftInvalid:
+		return http.StatusBadRequest, code, message
+	case agent.CodeCanceled:
+		return http.StatusConflict, code, message
+	default:
+		return http.StatusInternalServerError, "internal_error", "internal server error"
+	}
 }
 
 type errorBody struct {

@@ -182,6 +182,72 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/InternalError' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/agent/drafts:
+    post:
+      operationId: createAgentDraft
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DraftRequest' }
+      responses:
+        '201':
+          description: A generated, unvalidated workflow draft.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowDraft' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/agent/drafts/{draft-id}/validate:
+    post:
+      operationId: validateAgentDraft
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/DraftID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DraftEnvelope' }
+      responses:
+        '200':
+          description: The server-validated workflow draft.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowDraft' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/agent/drafts/{draft-id}/confirm:
+    post:
+      operationId: confirmAgentDraft
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/DraftID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfirmDraftRequest' }
+      responses:
+        '200':
+          description: The confirmed, compiled workflow definition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowDefinition' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/runs:
     get:
       operationId: listRuns
@@ -482,6 +548,11 @@ components:
       in: path
       required: true
       schema: { type: string, minLength: 1 }
+    DraftID:
+      name: draft-id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
     TaskKey:
       name: task-key
       in: path
@@ -574,6 +645,96 @@ components:
         status:
           type: string
           enum: [live, ready]
+    DraftRequest:
+      type: object
+      additionalProperties: false
+      required: [goal]
+      properties:
+        goal: { type: string, minLength: 1, maxLength: 4096 }
+    DraftEnvelope:
+      type: object
+      additionalProperties: false
+      required: [draft]
+      properties:
+        draft: { $ref: '#/components/schemas/WorkflowDraft' }
+    ConfirmDraftRequest:
+      type: object
+      additionalProperties: false
+      required: [draft, content_hash]
+      properties:
+        draft: { $ref: '#/components/schemas/WorkflowDraft' }
+        content_hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+    Evidence:
+      type: object
+      additionalProperties: false
+      required: [statement, source]
+      properties:
+        statement: { type: string }
+        source: { type: string }
+    Question:
+      type: object
+      additionalProperties: false
+      required: [id, text, resolved]
+      properties:
+        id: { type: string }
+        text: { type: string }
+        answer: { type: string }
+        resolved: { type: boolean }
+    ValidationIssue:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        path: { type: string }
+        message: { type: string }
+    ValidationReport:
+      type: object
+      additionalProperties: false
+      required: [errors, warnings]
+      properties:
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/ValidationIssue' }
+        warnings:
+          type: array
+          items: { $ref: '#/components/schemas/ValidationIssue' }
+    ToolCallRecord:
+      type: object
+      additionalProperties: false
+      required: [call_id, name, result]
+      properties:
+        call_id: { type: string }
+        name: { type: string }
+        result: { type: string }
+    DraftStatus:
+      type: string
+      enum: [generated, validated, needs_confirmation, confirmed, rejected]
+    WorkflowDraft:
+      type: object
+      additionalProperties: false
+      required: [draft_id, goal, definition, facts, assumptions, questions, validation, tool_calls, status, content_hash, created_at]
+      properties:
+        draft_id: { type: string }
+        goal: { type: string }
+        definition: { $ref: '#/components/schemas/WorkflowDefinition' }
+        facts:
+          type: array
+          items: { $ref: '#/components/schemas/Evidence' }
+        assumptions:
+          type: array
+          items: { $ref: '#/components/schemas/Evidence' }
+        questions:
+          type: array
+          items: { $ref: '#/components/schemas/Question' }
+        validation: { $ref: '#/components/schemas/ValidationReport' }
+        tool_calls:
+          type: array
+          items: { $ref: '#/components/schemas/ToolCallRecord' }
+        status: { $ref: '#/components/schemas/DraftStatus' }
+        content_hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        created_at: { type: string, format: date-time }
+        confirmed_at: { type: string, format: date-time }
     RetryPolicy:
       type: object
       additionalProperties: false
@@ -794,7 +955,7 @@ components:
         error: { $ref: '#/components/schemas/ErrorDetail' }
     ExecutorKind:
       type: string
-      enum: [mock]
+      enum: [mock, container]
     RegisterWorkerRequest:
       type: object
       additionalProperties: false

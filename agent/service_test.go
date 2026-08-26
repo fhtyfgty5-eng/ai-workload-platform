@@ -71,7 +71,7 @@ func TestRuntimeOverwritesModelSuppliedLifecycleFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if draft.Status != agent.DraftGenerated || len(draft.Validation.Errors) != 0 || len(draft.Validation.Warnings) != 0 || draft.ConfirmedAt != nil {
+	if draft.Status != agent.DraftGenerated || draft.Validation.Errors == nil || draft.Validation.Warnings == nil || len(draft.Validation.Errors) != 0 || len(draft.Validation.Warnings) != 0 || draft.ConfirmedAt != nil {
 		t.Fatalf("generated lifecycle fields = status %s validation %#v confirmed_at %v", draft.Status, draft.Validation, draft.ConfirmedAt)
 	}
 }

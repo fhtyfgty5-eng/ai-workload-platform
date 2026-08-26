@@ -158,7 +158,8 @@ func (s *Service) GenerateDraft(parent context.Context, goal string) (result Wor
 		}
 		draft.Goal = goal
 		draft.ToolCalls = records
-		draft.Validation = ValidationReport{}
+		// API 契约把校验项定义为数组；即使尚未校验也返回 []，避免客户端处理 null。
+		draft.Validation = ValidationReport{Errors: []ValidationIssue{}, Warnings: []ValidationIssue{}}
 		draft.ConfirmedAt = nil
 		draft.DraftID, err = newDraftID()
 		if err != nil {

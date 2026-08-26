@@ -36,6 +36,7 @@ required_files=(
   "docs/学习/文章/模块4-多Worker租约心跳与故障恢复.md"
   "docs/学习/文章/模块5-可观测性故障注入与性能验证.md"
   "docs/学习/文章/模块6-受限执行环境与Kubernetes.md"
+  "docs/学习/文章/模块7-真实场景最小控制台与开源发布.md"
   "docs/计划/项目路线图.md"
   "docs/计划/模块0详细计划.md"
   "docs/计划/模块1需求与设计.md"
@@ -53,6 +54,9 @@ required_files=(
   "docs/实验/模块4验证报告.md"
   "docs/实验/模块5验证报告.md"
   "docs/实验/模块6验证报告.md"
+  "docs/实验/模块7验证报告.md"
+  "docs/计划/模块7需求与设计.md"
+  "docs/计划/模块7实施计划.md"
   "docs/决策/ADR-0001-项目范围.md"
   "docs/决策/ADR-0002-产品定位与模块路线调整.md"
   "docs/决策/ADR-0003-控制面运行期故障采用安全退出.md"
@@ -99,7 +103,7 @@ errors = []
 checked = 0
 
 for markdown_file in root.rglob("*.md"):
-    if ".git" in markdown_file.parts:
+    if ".git" in markdown_file.parts or "node_modules" in markdown_file.parts or "dist" in markdown_file.parts:
         continue
     for line_number, line in enumerate(markdown_file.read_text(encoding="utf-8").splitlines(), 1):
         if line.endswith((" ", "\t")):

@@ -2,7 +2,7 @@
 
 面向 Agent 与确定性程序任务的可靠运行时和调度平台。
 
-> 当前可运行范围：模块 6 已在模块 5 的观测和故障验证基础上增加固定 Action 注册表、受限 Docker 容器执行、Kubernetes Job/Pod 描述和本地实验脚本。真实 Docker Go 执行器和 kind/client-go Job 已在本机 ARM64 环境通过验证。完整监控后台和 Web 控制台仍属于后续模块。
+> 当前可运行范围：模块 7 已增加 React/TypeScript/Vite 控制台，可完成自然语言草稿、服务端校验、人工确认、Workflow 创建、Run 启动和执行观测。默认使用 Mock Model/Executor；真实 Docker/Kubernetes 边界仍以模块 6 验证报告为准。
 
 ## 要解决的问题
 
@@ -71,15 +71,19 @@ go run ./cmd/workload agent confirm .workload/agent-demo/validated.json \
 go test ./...
 ```
 
-启动 PostgreSQL、执行迁移并运行控制面：
+首次运行先创建本机配置文件，并按[本地开发与配置](docs/部署/本地开发与配置.md)第 7 节生成三个不同的本地 Token。`.env.local` 已被 Git 忽略，不会提交：
 
 ```bash
+cp -n .env.example .env.local
+```
+
+启动 PostgreSQL、执行迁移并运行控制面。下面的 `source` 会把 `.env.local` 加载到当前终端；每个新终端都要单独加载一次：
+
+```bash
+set -a
+source .env.local
+set +a
 docker compose up -d postgres
-export DATABASE_URL='postgres://workload:workload_dev_only@localhost:5432/workload?sslmode=disable'
-export WORKLOAD_HTTP_ADDR='127.0.0.1:8080'
-export WORKLOAD_VIEWER_TOKEN='replace-with-viewer-token'
-export WORKLOAD_OPERATOR_TOKEN='replace-with-a-different-operator-token'
-export WORKLOAD_WORKER_BOOTSTRAP_TOKEN='replace-with-a-third-worker-token'
 go run ./cmd/workload-server migrate up
 go run ./cmd/workload-server
 ```
@@ -98,6 +102,16 @@ go run ./cmd/workload-worker
 第二个 Worker 使用 `WORKLOAD_WORKER_NAME='worker-b'`。Worker 会自行注册、按空闲槽位领取、心跳续租并提交 Mock 结果。要执行模块 6 的受限任务，把 Worker 的 `WORKLOAD_WORKER_RUNTIME` 设为 `docker` 或 `kubernetes`，并准备仓库内固定动作镜像。完整演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。
 
 Docker 登录不是本地公开 PostgreSQL 镜像的前置条件。新电脑环境准备、完整运行步骤和当前推荐演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。该手册会随后续模块持续更新，README 只保留当前版本的最短启动入口。
+
+启动浏览器控制台（需要先启动 PostgreSQL、控制面和至少一个 Worker）：
+
+```bash
+cd web
+npm ci
+npm run dev
+```
+
+打开终端输出的 Vite 地址（通常是 `http://127.0.0.1:5173/`），输入 operator Token。点击“创建草稿”，输入“先读取 article.md，再清洗内容，最后生成摘要”，依次校验、确认并启动运行。控制台通过 Vite 代理访问控制面，不保存 Token 到仓库或 URL；完整终端职责和换电脑步骤见[本地开发与配置](docs/部署/本地开发与配置.md)。
 
 服务启动后，可以使用 viewer Token 读取低基数 Prometheus 指标。该接口不会返回 Run、Task、Worker 或 Dispatch ID 标签：
 
@@ -132,15 +146,23 @@ WORKLOAD_DATA_DIR=/tmp/workload-runs go run ./cmd/workload local run examples/do
 
 `.workload/` 已加入 Git 忽略规则。示例使用 Mock Executor 返回确定成功结果，不会执行 Action 中的本机命令，也不会调用模型或外部服务。
 
-控制面启动后，可在另一个终端导出 `WORKLOAD_SERVER_URL` 和 operator Token，再通过 HTTP 控制面创建并启动同一工作流：
+控制面启动后，可在另一个终端加载本机配置，再通过 HTTP 控制面创建并启动同一工作流：
 
 ```bash
-export WORKLOAD_SERVER_URL='http://127.0.0.1:8080'
+set -a
+source .env.local
+set +a
 export WORKLOAD_TOKEN="$WORKLOAD_OPERATOR_TOKEN"
+export WORKLOAD_SERVER_URL="${WORKLOAD_SERVER_URL:-http://127.0.0.1:8080}"
 go run ./cmd/workload workflow create examples/document-pipeline.json --idempotency-key demo-workflow-v1
-go run ./cmd/workload run start document-pipeline --version 1 --idempotency-key demo-run-1
-go run ./cmd/workload run status <上一步返回的run_id>
+DEMO_SUFFIX="$(date +%Y%m%d%H%M%S)"
+START_OUTPUT="$(go run ./cmd/workload run start document-pipeline --version 1 --idempotency-key "demo-run-$DEMO_SUFFIX")"
+printf '%s\n' "$START_OUTPUT"
+RUN_ID="$(printf '%s\n' "$START_OUTPUT" | sed -nE 's/.*"run_id":"([^"]+)".*/\1/p')"
+go run ./cmd/workload run status "$RUN_ID"
 ```
+
+首次运行时执行创建命令；如果 Workflow 已存在并返回 `409 workflow_exists`，跳过该行继续启动 Run。创建 Workflow 的幂等 Key 必须在同一 Workflow 的重复请求中保持一致，不要为了绕过冲突更换 Key；每次要启动新的 Run，再生成新的 Run 幂等 Key。
 
 网络控制面不会在自身进程执行任务；至少一个 `workload-worker` 必须在线，Run 才能从 `ready` 进入分发和执行。Worker 只返回安全 Mock 结果，不解释或执行 `Action`。
 
@@ -182,9 +204,9 @@ go run ./cmd/workload run status <上一步返回的run_id>
 4. 多 Worker、租约、心跳与故障恢复，已完成；
 5. 可观测性、故障注入与性能验证，已完成工程实现、八类故障、五类告警和 24 组五轮性能对照；
 6. 受限执行环境与 Kubernetes，已完成执行器、固定动作镜像、清单、Docker 和 kind/client-go 真实验证；
-7. 真实场景、最小控制台与开源发布。
+7. 真实场景、最小控制台与开源发布，正在收尾。
 
-各模块为什么按此顺序推进、上一模块留下什么问题、下一模块使用哪些技术解决，见[项目路线图](docs/计划/项目路线图.md)中的“模块递进关系”。当前已完成模块的执行边界见[模块 6 需求与设计](docs/计划/模块6需求与设计.md)，下一阶段的控制台与开源交付范围见项目路线图中的“模块 7”。
+各模块为什么按此顺序推进、上一模块留下什么问题、下一模块使用哪些技术解决，见[项目路线图](docs/计划/项目路线图.md)中的“模块递进关系”。当前各模块的执行边界和模块 7收尾范围以项目路线图、验证报告和[本地开发与配置](docs/部署/本地开发与配置.md)为准。
 
 ## 当前可阅读内容
 
@@ -208,6 +230,8 @@ go run ./cmd/workload run status <上一步返回的run_id>
 - [模块 5 验证报告](docs/实验/模块5验证报告.md)：八类故障、五类告警、24 组五轮基准和真实证据边界。
 - [模块 6 学习文章](docs/学习/文章/模块6-受限执行环境与Kubernetes.md)：固定 Action、Docker/Kubernetes 执行、安全边界、资源限制和本地验证。
 - [模块 6 验证报告](docs/实验/模块6验证报告.md)：Docker、kind/client-go 真实执行证据、静态清单和剩余实验边界。
+- [模块 7 学习文章](docs/学习/文章/模块7-真实场景最小控制台与开源发布.md)：浏览器控制台、Draft API、Token 会话、轮询、CI/CD 和开源边界。
+- [模块 7 验证报告](docs/实验/模块7验证报告.md)：浏览器闭环、自动化验证和明确限制。
 - [模块 1 性能基线](docs/实验/模块1性能基线.md)：10,000 任务、1,000 Run、恢复和 FileStore 的原始 Benchmark 数据。
 
 当前代码入口和限制见上方“快速开始”和“当前实现边界”。

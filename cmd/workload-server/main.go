@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/agentapp"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/alerting"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/app"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/config"
@@ -57,6 +58,10 @@ func serve() error {
 		return err
 	}
 	metrics := observability.NewMetrics(nil)
+	drafts, err := agentapp.NewService(cfg.ModelAdapter, os.Getenv)
+	if err != nil {
+		return err
+	}
 	tracerProvider, closeTracer, err := observability.NewTracerProvider(observability.TracingConfig{Mode: cfg.TracingMode, ServiceName: cfg.TracingServiceName, Writer: os.Stderr})
 	if err != nil {
 		return err
@@ -144,7 +149,7 @@ func serve() error {
 		return err
 	}
 	logger.Info("workload server ready", "addr", cfg.HTTPAddr)
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewHandler(httpapi.Dependencies{Workflows: definitions, Runs: runs, Workers: workers, ViewerToken: cfg.ViewerToken, OperatorToken: cfg.OperatorToken, Ready: coordinator.Ready, Logger: logger, Metrics: metrics, Tracer: tracerProvider.Tracer("workload-server")})}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewHandler(httpapi.Dependencies{Workflows: definitions, Runs: runs, Drafts: drafts, Workers: workers, ViewerToken: cfg.ViewerToken, OperatorToken: cfg.OperatorToken, Ready: coordinator.Ready, Logger: logger, Metrics: metrics, Tracer: tracerProvider.Tracer("workload-server")})}
 	return superviseServer(ctx, server, coordinator, 5*time.Second)
 }
 

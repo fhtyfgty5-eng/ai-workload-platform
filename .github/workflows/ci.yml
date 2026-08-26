@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Go format
+        run: test -z "$(gofmt -l .)"
+      - name: Go tests
+        run: go test ./... -count=1
+      - name: Go race tests
+        run: go test -race ./... -count=1
+      - name: Go vet
+        run: go vet ./...
+      - name: Documentation checks
+        run: bash scripts/verify-docs.sh
+      - name: Kubernetes manifest checks
+        run: bash scripts/verify-k8s-manifests.sh
+      - name: Secret checks
+        run: bash scripts/check-secrets.sh
+      - name: Frontend install
+        working-directory: web
+        run: npm ci
+      - name: Frontend tests
+        working-directory: web
+        run: npm test -- --run
+      - name: Frontend typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Frontend build
+        working-directory: web
+        run: npm run build

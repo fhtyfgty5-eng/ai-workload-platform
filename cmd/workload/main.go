@@ -13,9 +13,7 @@ import (
 	"syscall"
 
 	"github.com/fhtyfgty5-eng/ai-workload-platform/agent"
-	"github.com/fhtyfgty5-eng/ai-workload-platform/agent/catalog"
-	"github.com/fhtyfgty5-eng/ai-workload-platform/agent/httpmodel"
-	"github.com/fhtyfgty5-eng/ai-workload-platform/agent/mockmodel"
+	"github.com/fhtyfgty5-eng/ai-workload-platform/internal/agentapp"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/pkg/workloadclient"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow"
 	"github.com/fhtyfgty5-eng/ai-workload-platform/workflow/filestore"
@@ -156,26 +154,7 @@ func parseAgentOptions(args []string) (agentOptions, bool) {
 }
 
 func newAgentService(modelName string, getenv func(string) string) (*agent.Service, error) {
-	directory, err := catalog.New(catalog.DefaultTemplates())
-	if err != nil {
-		return nil, err
-	}
-	registry, err := agent.NewToolRegistry(agent.RegisteredTool{Tool: catalog.NewTool(directory), RequiredPermission: "catalog:read"})
-	if err != nil {
-		return nil, err
-	}
-	var model agent.ModelAdapter = mockmodel.New()
-	if modelName == "http" {
-		model, err = httpmodel.New(httpmodel.Config{
-			Endpoint: getenv("WORKLOAD_MODEL_ENDPOINT"),
-			Model:    getenv("WORKLOAD_MODEL_NAME"),
-			APIKey:   getenv("WORKLOAD_MODEL_API_KEY"),
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	return agent.NewService(model, registry, agent.NewDraftValidator(directory, []string{"document:read"}), agent.NewMemoryAuditSink(), agent.DefaultLimits(), []string{"catalog:read"})
+	return agentapp.NewService(modelName, getenv)
 }
 
 func readDraft(path string) (agent.WorkflowDraft, error) {
