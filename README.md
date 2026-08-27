@@ -67,7 +67,7 @@ go run ./cmd/workload agent confirm .workload/agent-demo/validated.json \
   --hash "$DRAFT_HASH" --output .workload/agent-demo/workflow.json
 ```
 
-`draft` 生成结构化建议，`validate` 检查任务目录、参数、权限、任务超时、Agent 并发与 DAG，`confirm` 验证草稿哈希后只输出最终 WorkflowDefinition，不会自动创建 Workflow 或启动 Run。CPU、内存和临时存储限制留到模块 6 的真实执行环境。完整演示和真实模型人工配置见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。
+`draft` 生成结构化建议，`validate` 检查任务目录、参数、权限、任务超时、Agent 并发与 DAG，`confirm` 验证草稿哈希后只输出最终 WorkflowDefinition，不会自动创建 Workflow 或启动 Run。CPU、内存和临时存储限制留到模块 6 的真实执行环境。完整浏览器演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)；默认演示使用 Mock Model，不要求真实模型服务。真实模型适配器的协议边界见模块 7 学习文章和验证报告。
 
 运行全部自动化测试（真实 PostgreSQL 测试需要设置 `TEST_DATABASE_URL`）：
 
