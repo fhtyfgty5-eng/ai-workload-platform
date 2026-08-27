@@ -92,20 +92,20 @@ go run ./cmd/workload-server migrate up
 go run ./cmd/workload-server
 ```
 
-控制面启动后，在两个新终端中加载相同的本机配置，并为每个进程设置不同名称：
+控制面启动后，在一个新终端中加载相同的本机配置并启动一个 Worker：
 
 ```bash
 set -a
 source .env.local
 set +a
 export WORKLOAD_SERVER_URL='http://127.0.0.1:8080'
-export WORKLOAD_WORKER_NAME='worker-a'
+export WORKLOAD_WORKER_NAME='worker-main'
 go run ./cmd/workload-worker
 ```
 
-第二个 Worker 使用 `WORKLOAD_WORKER_NAME='worker-b'`。Worker 会自行注册、按空闲槽位领取、心跳续租并提交 Mock 结果。要执行模块 6 的受限任务，把 Worker 的 `WORKLOAD_WORKER_RUNTIME` 设为 `docker` 或 `kubernetes`，并准备仓库内固定动作镜像。完整演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。
+Worker 会自行注册、按空闲槽位领取、心跳续租并提交 Mock 结果。第二个 Worker 只在多 Worker 专项验证时启动；模块 6 的 Docker/Kubernetes 执行器也属于专项路径。完整演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。
 
-Docker 登录不是本地公开 PostgreSQL 镜像的前置条件。新电脑环境准备、完整运行步骤和当前推荐演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。该手册会随后续模块持续更新，README 只保留当前版本的最短启动入口。
+Docker 登录不是本地公开 PostgreSQL 镜像的前置条件。新电脑环境准备、完整运行步骤和当前推荐演示见[项目本地运行、演示与换电脑手册](docs/部署/本地开发与配置.md)。该手册按仓库版本维护，README 只保留当前版本的最短启动入口。
 
 启动浏览器控制台（需要先启动 PostgreSQL、控制面和至少一个 Worker）：
 
