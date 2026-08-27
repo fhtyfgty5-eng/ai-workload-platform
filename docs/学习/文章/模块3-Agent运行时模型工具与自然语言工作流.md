@@ -619,3 +619,7 @@ go run ./cmd/workload run start \
 - Go `net/http` 官方文档：<https://pkg.go.dev/net/http>
 - OpenAI Function Calling 官方说明：<https://platform.openai.com/docs/guides/function-calling>
 - OpenAI Structured Outputs 官方说明：<https://platform.openai.com/docs/guides/structured-outputs>
+
+## 项目源码
+
+本文对应模块 3。完整源码、Mock 演示和后续模块见 [AI Workload Platform GitHub 仓库](https://github.com/fhtyfgty5-eng/ai-workload-platform)。

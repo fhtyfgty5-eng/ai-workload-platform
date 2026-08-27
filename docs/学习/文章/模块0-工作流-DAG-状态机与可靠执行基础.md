@@ -356,3 +356,7 @@ Kubernetes 能解决部署、资源和容器生命周期问题，但不能替代
 - [Argo Workflows 官方文档](https://argo-workflows.readthedocs.io/en/latest/)
 - [Kubernetes 官方文档：Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/)
 - [LangGraph 官方文档：Overview](https://docs.langchain.com/oss/python/langgraph/overview)
+
+## 项目源码
+
+本文对应模块 0 的工作流基础。完整源码、验证报告和后续模块见 [AI Workload Platform GitHub 仓库](https://github.com/fhtyfgty5-eng/ai-workload-platform)。

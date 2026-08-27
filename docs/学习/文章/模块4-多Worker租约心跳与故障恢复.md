@@ -342,3 +342,7 @@ Kubernetes 能创建和重启容器，但它不知道一个工作流 Task 的重
 - PostgreSQL `SELECT` 与 `SKIP LOCKED` 官方文档：<https://www.postgresql.org/docs/current/sql-select.html>
 - PostgreSQL 日期与时间函数官方文档：<https://www.postgresql.org/docs/current/functions-datetime.html>
 - RFC 6750 Bearer Token 规范：<https://www.rfc-editor.org/rfc/rfc6750>
+
+## 项目源码
+
+本文对应模块 4。完整源码、多 Worker 故障实验和后续模块见 [AI Workload Platform GitHub 仓库](https://github.com/fhtyfgty5-eng/ai-workload-platform)。

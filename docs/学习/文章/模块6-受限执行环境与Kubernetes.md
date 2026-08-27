@@ -274,3 +274,7 @@ bash -n scripts/run-module6-docker.sh scripts/run-module6-kubernetes.sh
 - [Kubernetes Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)
 - [Kubernetes Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
 - [kind 文档](https://kind.sigs.k8s.io/)
+
+## 项目源码
+
+本文对应模块 6。完整源码、Docker/Kubernetes 清单和验证报告见 [AI Workload Platform GitHub 仓库](https://github.com/fhtyfgty5-eng/ai-workload-platform)。
